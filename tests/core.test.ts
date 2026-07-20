@@ -93,7 +93,11 @@ describe("session-safe core", () => {
     const state = createSessionState("trace-validation", temporary())
     const verification = createVerificationRecord({ command: "test", files: ["a.ts"], verdict: "pass", exitCode: 0, durationMs: 1, stdout: "ok", stderr: "" })
     addWriteBatch(state.trace, ["a.ts", "b.ts"], "Edit", verification, 3)
+    expect(state.trace.session.agentVersion).toBe("0.1.1")
     expect(validateSessionState(structuredClone(state))).toBeTruthy()
+    const priorPatch = structuredClone(state)
+    priorPatch.trace.session.agentVersion = "0.1.0"
+    expect(validateSessionState(priorPatch)).toBeTruthy()
     const badPhase = structuredClone(state)
     badPhase.trace.phases.push({ phase: "summary", timestamp: "not-a-date", data: {} })
     expect(() => validateSessionState(badPhase)).toThrow(/phase record/)

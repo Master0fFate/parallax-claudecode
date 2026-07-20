@@ -1,6 +1,6 @@
 {
   "name": "parallax-claudecode",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Evidence-first protocol gates, verification, traces, Hyperplan, and durable Horizon orchestration for Claude Code",
   "type": "module",
   "main": "./dist/index.js",

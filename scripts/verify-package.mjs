@@ -73,7 +73,7 @@ if (plugin.name !== manifest.name || plugin.version !== manifest.version || list
   process.exit(1)
 }
 const runtimeVersions = {
-  "dist/trace.js": `agentVersion: \"${manifest.version}\"`,
+  "dist/trace.js": `const AGENT_VERSION = \"${manifest.version}\"`,
   "dist/mcp.js": `serverInfo: { name: \"parallax-claudecode\", version: \"${manifest.version}\" }`,
 }
 for (const [runtime, marker] of Object.entries(runtimeVersions)) {

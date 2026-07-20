@@ -12,13 +12,16 @@ import {
   type VerificationVerdict,
 } from "./types.js"
 
+const AGENT_VERSION = "0.1.1"
+const SUPPORTED_AGENT_VERSIONS = new Set(["0.1.0", AGENT_VERSION])
+
 export function createTrace(sessionId: string, project: string, projectType: ProjectType = null): ParallaxTrace {
   return {
     schemaVersion: PARALLAX_SCHEMA_VERSION,
     session: {
       id: sessionId,
       agent: "parallax",
-      agentVersion: "0.1.0",
+      agentVersion: AGENT_VERSION,
       startedAt: new Date().toISOString(),
       endedAt: null,
       project: resolve(project),
@@ -49,7 +52,7 @@ export function validateTrace(value: unknown, expectedSessionId?: string, expect
   const session = value.session
   if (!object(session) || typeof session.id !== "string" || !session.id) throw new Error("Invalid trace session")
   if (expectedSessionId !== undefined && session.id !== expectedSessionId) throw new Error("Trace belongs to a different session")
-  if (session.agent !== "parallax" || session.agentVersion !== "0.1.0" || !timestamp(session.startedAt)
+  if (session.agent !== "parallax" || !SUPPORTED_AGENT_VERSIONS.has(session.agentVersion as string) || !timestamp(session.startedAt)
     || (session.endedAt !== null && !timestamp(session.endedAt)) || typeof session.project !== "string" || !session.project
     || !PROJECT_TYPES.has(session.projectType as ProjectType)) throw new Error("Invalid trace metadata")
   if (typeof session.endedAt === "string" && Date.parse(session.endedAt) < Date.parse(session.startedAt)) throw new Error("Trace endedAt precedes startedAt")

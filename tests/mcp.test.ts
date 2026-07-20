@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
@@ -70,8 +70,9 @@ describe("bundled MCP server", () => {
     process.env.CLAUDE_PROJECT_DIR = project
     try {
       const server = new ParallaxMcpServer({ horizonRoot: temporary() })
-      expect(server.projectRoot).toBe(project)
-      expect(server.sessions.root).toContain(project)
+      const canonicalProject = realpathSync(project)
+      expect(server.projectRoot).toBe(canonicalProject)
+      expect(server.sessions.root).toContain(canonicalProject)
     } finally {
       if (previous === undefined) delete process.env.CLAUDE_PROJECT_DIR
       else process.env.CLAUDE_PROJECT_DIR = previous

@@ -2,6 +2,15 @@
 
 All notable changes to Parallax for Claude Code are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.1.1] - 2026-07-20
+
+### Fixed
+
+- Canonicalized temporary project paths in cross-platform MCP tests.
+- Treated transient Windows `EPERM`/`EACCES` lock-stat races as contention instead of fatal corruption.
+- Preserved compatibility with trace state created by 0.1.0.
+- Updated GitHub Actions to current Node 24-based action runtimes.
+
 ## [0.1.0] - 2026-07-20
 
 ### Added
@@ -13,4 +22,5 @@ All notable changes to Parallax for Claude Code are documented here. This projec
 - Durable Horizon execution with independent verification and migration from legacy OpenCode state.
 - Cross-platform npm installer, strict package checks, and Node 20/22 CI across Linux, macOS, and Windows.
 
+[0.1.1]: https://github.com/Master0fFate/parallax-claudecode/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/Master0fFate/parallax-claudecode/releases/tag/v0.1.0

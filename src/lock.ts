@@ -55,7 +55,11 @@ export function withDirectoryLock<T>(lock: string, operation: () => T, options: 
       // a grace period; because names are never reused this cannot delete a replacement claim.
       if (!owner) {
         try { if (Date.now() - statSync(path).mtimeMs > 1_000) { rmSync(path, { recursive: true, force: true }); return false } }
-        catch { return false }
+        catch (error) {
+          // Windows can transiently deny stat while another process creates or removes a
+          // directory. Keep the claim active unless it is definitively gone.
+          return (error as NodeJS.ErrnoException).code !== "ENOENT"
+        }
       }
       return true
     })
@@ -85,7 +89,10 @@ export function withDirectoryLock<T>(lock: string, operation: () => T, options: 
       // current owner because claims could continuously cover its release window.
       let looksStale = false
       try { looksStale = Date.now() - statSync(lock).mtimeMs > staleMs }
-      catch (statError) { if ((statError as NodeJS.ErrnoException).code !== "ENOENT") throw statError }
+      catch (statError) {
+        const statCode = (statError as NodeJS.ErrnoException).code
+        if (statCode !== "ENOENT" && statCode !== "EPERM" && statCode !== "EACCES") throw statError
+      }
       if (code !== "EAGAIN" && looksStale) {
         const claim = join(parent, `${claimPrefix}${process.pid}.${randomUUID()}`)
         const claimToken = randomUUID()
@@ -95,7 +102,10 @@ export function withDirectoryLock<T>(lock: string, operation: () => T, options: 
           try {
             let stale = false
             try { stale = Date.now() - statSync(lock).mtimeMs > staleMs }
-            catch (statError) { if ((statError as NodeJS.ErrnoException).code !== "ENOENT") throw statError }
+            catch (statError) {
+              const statCode = (statError as NodeJS.ErrnoException).code
+              if (statCode !== "ENOENT" && statCode !== "EPERM" && statCode !== "EACCES") throw statError
+            }
             if (stale && !ownerIsAlive(readOwner(lock))) rmSync(lock, { recursive: true, force: true })
           } finally {
             removeIfOwned(claim, claimToken)
