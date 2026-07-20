@@ -1,0 +1,12 @@
+{
+  "name": "parallax-claudecode",
+  "version": "0.1.0",
+  "description": "Session-safe Parallax protocol state, verification traces, coherence scoring, and validated Horizon persistence for Claude Code.",
+  "author": {
+    "name": "Master0fFate"
+  },
+  "homepage": "https://github.com/Master0fFate/parallax-claudecode",
+  "repository": "https://github.com/Master0fFate/parallax-claudecode",
+  "license": "MIT",
+  "keywords": ["parallax", "verification", "horizon", "tracing"]
+}

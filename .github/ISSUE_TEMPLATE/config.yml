@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/Master0fFate/parallax-claudecode/security/advisories/new
+    about: Report vulnerabilities privately instead of opening a public issue
+  - name: Claude Code documentation
+    url: https://docs.anthropic.com/en/docs/claude-code
+    about: Check upstream Claude Code behavior and installation guidance

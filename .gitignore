@@ -1,0 +1,45 @@
+# Dependencies and generated output
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Runtime and agent state
+.parallax/
+.live-test/
+.claude/settings.local.json
+
+# Local databases and caches
+.codeviewer-mcp.sqlite
+.codegraph/
+.cache/
+.npm/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+.npmrc
+
+# Logs, package archives, and scratch files
+*.log
+*.tgz
+*.tar.gz
+*.zip
+*.tmp
+*.temp
+*.swp
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Local-only audit artifacts
+docs/RELEASE-AUDIT.md
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini

@@ -1,0 +1,48 @@
+name: Feature request
+description: Propose a focused improvement for Parallax or Horizon
+title: "[Feature]: "
+labels: [enhancement, triage]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What workflow or failure mode is difficult today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the smallest useful outcome, not only an implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What workarounds or simpler options did you consider?
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Primary surface
+      options:
+        - Hooks and protocol gates
+        - MCP tools
+        - Skills or agents
+        - Horizon
+        - Hyperplan
+        - Verification
+        - Packaging and installation
+        - Documentation
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and pull requests.
+          required: true
+        - label: This request preserves explicit verification and trust boundaries.
+          required: true

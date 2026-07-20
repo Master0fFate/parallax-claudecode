@@ -1,0 +1,84 @@
+{
+  "name": "parallax-claudecode",
+  "version": "0.1.0",
+  "description": "Evidence-first protocol gates, verification, traces, Hyperplan, and durable Horizon orchestration for Claude Code",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "parallax-claudecode": "scripts/install.mjs",
+    "parallax-claudecode-mcp": "dist/mcp.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    ".claude-plugin",
+    ".mcp.json",
+    "agents",
+    "commands",
+    "hooks",
+    "skills",
+    "dist",
+    "docs",
+    "examples",
+    "scripts/install.mjs",
+    "scripts/dev.mjs",
+    "scripts/verify-package.mjs",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "coverage": "vitest run --coverage",
+    "verify:package": "node scripts/verify-package.mjs",
+    "prepack": "npm run build",
+    "install:local": "node scripts/install.mjs",
+    "install:dry": "node scripts/install.mjs --dry-run",
+    "dev": "node scripts/dev.mjs",
+    "check": "npm run typecheck && npm run build && npm run coverage && npm run verify:package"
+  },
+  "keywords": [
+    "claude-code",
+    "claude-code-plugin",
+    "anthropic",
+    "ai-agents",
+    "agentic-coding",
+    "mcp",
+    "model-context-protocol",
+    "parallax",
+    "verification",
+    "horizon",
+    "hyperplan",
+    "developer-tools"
+  ],
+  "author": "Master0fFate",
+  "license": "MIT",
+  "homepage": "https://github.com/Master0fFate/parallax-claudecode#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Master0fFate/parallax-claudecode.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Master0fFate/parallax-claudecode/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.19",
+    "@vitest/coverage-v8": "^3.2.7",
+    "typescript": "^5.7.0",
+    "vitest": "^3.2.4"
+  }
+}
