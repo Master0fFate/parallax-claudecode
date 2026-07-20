@@ -70,7 +70,7 @@ describe("bundled MCP server", () => {
     process.env.CLAUDE_PROJECT_DIR = project
     try {
       const server = new ParallaxMcpServer({ horizonRoot: temporary() })
-      const canonicalProject = realpathSync(project)
+      const canonicalProject = realpathSync.native(project)
       expect(server.projectRoot).toBe(canonicalProject)
       expect(server.sessions.root).toContain(canonicalProject)
     } finally {
