@@ -1,5 +1,7 @@
 # Troubleshooting
 
+Start with `parallax-claudecode doctor` (human Markdown) or `parallax-claudecode doctor --json` (schema-versioned machine output). Diagnostics redact project/home locations and never print settings contents or credentials.
+
 ## Plugin or skills do not appear
 
 Build first, validate both manifests, then restart Claude Code:
@@ -12,6 +14,8 @@ claude plugin validate --strict .claude-plugin/marketplace.json
 ```
 
 For checkout development, run `npm run dev -- --help` or launch `claude --plugin-dir <absolute-path>`. For marketplace installation, inspect `claude plugin list` and reinstall `parallax-claudecode@parallax-local`.
+
+If doctor reports a stale cache, rerun `parallax-claudecode --scope user` to invoke native marketplace/plugin update, then restart Claude. To uninstall while retaining Claude plugin data, run `claude plugin uninstall parallax-claudecode@parallax-local --scope user --keep-data`. This does not remove project `.parallax/` or `~/.parallax/horizon/` data.
 
 ## MCP tools are unavailable
 
@@ -34,6 +38,15 @@ Detection starts at the hook `cwd` and searches upward. Inspect the nearest Carg
 ## Horizon artifact is rejected
 
 Read the validation error and fix the producer. Typical causes are a foreign session ID, duplicate feature/plan IDs, invalid status enums, retries above the cap, or plan statistics inconsistent with feature status. Back up corrupt legacy data before initializing a replacement session.
+
+## Corrupt ledger, queue, or stale lock
+
+- Canonical receipts: `<project>/.parallax/verification-ledger.jsonl`; recovery copies corrupt bytes and a SHA-256 manifest to `<project>/.parallax/ledger-archive/`. Archives are evidence, never canonical receipts. Resume only after doctor reports the canonical ledger valid.
+- Mutation queues: `<project>/.parallax/mutation-intents/<safe-session-id>/queue.json`. Preserve unresolved intent evidence; do not clear it merely to bypass verification.
+- Locks are `*.lock` directories beside their stores. Remove one only after confirming its owner process is dead and no Claude/Parallax operation is active; rerun doctor afterward. Live locks resolve through bounded waiting and stale-owner recovery.
+- Horizon recovery lives under `~/.parallax/horizon/sessions/<id>/`. Use the reported active-child identity and recovery tool; never substitute a different child ID.
+
+Claude Code 2.1.215 has incomplete background subagent completion metadata. Use the foreground Horizon lifecycle; lack of background progress is not a stuck daemon because Horizon is not a daemon.
 
 ## Windows notes
 

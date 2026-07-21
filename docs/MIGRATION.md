@@ -13,6 +13,8 @@ npm run install:local
 
 Alternatively, add this repository as a marketplace and install `parallax-claudecode@parallax-local`. Restart Claude Code after installation.
 
+Install/update remains Claude-native and idempotent: `parallax-claudecode --scope user`. Preview with `--dry-run`. Diagnose with `parallax-claudecode doctor --json`. Uninstall through `parallax-claudecode uninstall --scope user --keep-data` or the equivalent `claude plugin uninstall parallax-claudecode@parallax-local --scope user --keep-data`; no hidden settings edits or custom recursive deletion occurs.
+
 ## Command mapping
 
 | OpenCode | Claude Code |
@@ -47,3 +49,5 @@ Do not put a shell command in project policy. Claude rejects `verificationComman
 - Agents and skills are namespaced by Claude as `parallax-claudecode:*`.
 - Installation has no package lifecycle side effects. The explicit installer invokes Claude's marketplace commands.
 - Hidden reasoning is never persisted; traces contain decisions, observations, write records, and verification evidence only.
+- Legacy score-backed Horizon completion is not migrated as acceptance. Current completion requires a worker-bound schema-v2 receipt and a distinct auditor.
+- Horizon is not a daemon. Claude 2.1.215's background completion limitation requires foreground child dispatch and durable lifecycle correlation.

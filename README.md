@@ -24,11 +24,11 @@ Parallax turns repository work into a visible, testable protocol. Before mutatio
 | **Auditable traces** | Linked decisions, mutations, verification results, friction, and coherence metrics |
 | **Hyperplan** | Adversarial plan review before high-risk architecture, migration, or security work |
 | **Horizon** | Durable milestone execution with bounded retries and independently verified completion |
-| **Claude-native integration** | 9 lifecycle hooks, 30 MCP tools, 9 skills, and focused Parallax/Horizon agents |
+| **Claude-native integration** | 12 native lifecycle hook events, 37 MCP tools, 9 skills, and four focused agents |
 
 ## Requirements
 
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) 2.x
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) `>=2.1.215 <3` (tested range)
 - Node.js 20 or newer
 
 ## Installation
@@ -55,7 +55,10 @@ parallax-claudecode --scope user      # all projects for your user
 parallax-claudecode --scope project   # shared through .claude/settings.json
 parallax-claudecode --scope local     # private to the current checkout
 parallax-claudecode --dry-run         # preview Claude commands only
+parallax-claudecode doctor --json     # stable machine-readable diagnostics
 ```
+
+Doctor derives the current hook events and exact `parallax_*`/`horizon_*` MCP tool names from the installed runtime, so its inventory and count cannot drift from a packed release.
 
 To update:
 
@@ -63,6 +66,16 @@ To update:
 npm update --global parallax-claudecode
 parallax-claudecode --scope user
 ```
+
+Native uninstall is explicit; Parallax never edits Claude settings or deletes plugin data itself:
+
+```bash
+parallax-claudecode uninstall --scope user --keep-data
+# equivalent native command:
+claude plugin uninstall parallax-claudecode@parallax-local --scope user --keep-data
+```
+
+Omit `--keep-data` only when you intend Claude to remove its plugin data directory. Project `.parallax/` and `~/.parallax/horizon/` stores are separate and remain yours to archive or remove.
 
 ### From source
 
@@ -129,13 +142,25 @@ Hyperplan is optional for ordinary work and expected for meaningful integration,
 
 ## Horizon
 
-Horizon researches and persists findings, writes milestone/feature acceptance criteria, executes one feature at a time, and evaluates actual results across protocol integrity, verification, correctness, design, edge cases, and user perspective. `horizon_evaluate_subagent` independently runs the project's detected checks and derives verification as pass or fail; caller-supplied evidence cannot open completion. Passing checks and a 75 aggregate are required, otherwise a bounded corrective pass is required. It pauses after execution begins only for a genuine unavailable external resource or irreversible authorization. Source-compatible Horizon `testCommand` and `lintCommand` values are stored configuration metadata only and are never executed by this release; executable verification comes exclusively from the project detector's argument-array policy.
+Horizon persists plans and runs one worker at a time. Completion requires a worker-bound schema-v2 receipt with exact `pass`, followed by a distinct read-only auditor verdict; prose, legacy scores, and caller-supplied evidence do not open completion. Retries are bounded. Horizon advances only while Claude Code is running and permissions are granted: it is not a background daemon and does not guarantee autonomous or perfect completion. In Claude Code 2.1.215, background subagent completion metadata is incomplete, so Horizon conservatively uses foreground child dispatch and durable stop/completion correlation.
+
+## Guarantee matrix
+
+| Class | Exact guarantee |
+|---|---|
+| **Runtime-enforced** | Session/schema validation, ordered gate state, durable mutation intents, receipt ledger append/read-back, bounded retries, one active Horizon child, and worker/auditor identity transitions. |
+| **Permission-enforced** | Worker cannot delegate or record audits; auditor has no Bash/Edit/Write/verify tools. Effective enforcement remains Claude Code's native tool permission system. |
+| **Prompt-guided** | Investigation quality, scope discipline, summaries, and the instruction to avoid self-audit. Prompts are guidance, not a sandbox. |
+| **Observed-only** | Test output, coherence metrics, liveness, and tool completion are evidence about observed runs—not proof of correctness, perfection, or future completion. |
 
 ## State and privacy
 
 ```text
 <project>/.parallax/sessions/<safe-session-id>/state.json
 <project>/.parallax/traces/<safe-session-id>.json
+<project>/.parallax/mutation-intents/<safe-session-id>/queue.json
+<project>/.parallax/verification-ledger.jsonl
+<project>/.parallax/ledger-archive/*
 ~/.parallax/horizon/sessions/<horizon-id>/...
 ```
 
@@ -181,12 +206,15 @@ npm run coverage
 npm run build
 npm run verify:package
 npm run check
+npm run release:proof
 npm pack --dry-run
 ```
 
-Published packages include compiled `dist`, native plugin metadata, agents, all namespaced skills, hooks, docs, examples, license, and explicit install/dev scripts. Source, tests, coverage, local state, and secrets are rejected by package verification. Coverage enforces repository-wide V8 thresholds, while the test matrix exercises tools, hooks, concurrent persistence, corrupt-state recovery, project/path handling, security boundaries, and deterministic fixtures. CI runs checks on Node 20/22 across Linux, Windows, and macOS and validates both Claude manifests.
+Published packages include compiled `dist`, native plugin metadata, agents, all namespaced skills, hooks, docs, examples, license, and explicit install/dev/release-proof scripts. Source, tests, coverage, `.parallax/release-proof` reports, local state, and secrets are rejected by package verification. `npm run release:proof` performs a clean check, a bounded all-scope `npm audit` at the explicit `high` threshold, strict manifest validation, real tarball inspection, and isolated packed-runtime smoke against exactly Claude Code 2.1.215. Its sanitized schema-v2 report is written under `.parallax/release-proof/`; every applicable check must pass for `publishable: true`. Authentication-dependent model turns remain visibly `skipped` and non-applicable when credentials are unavailable because direct packed hook/MCP tests prove the deterministic criteria. Native role frontmatter is asserted as packaged static configuration; CLI init inventories are not represented as per-agent effective runtime permissions. Coverage enforces repository-wide V8 thresholds, while the test matrix exercises tools, hooks, concurrent persistence, corrupt-state recovery, project/path handling, security boundaries, and deterministic fixtures. CI runs checks on Node 20/22 across Linux, Windows, and macOS and validates both Claude manifests.
 
 Programmatic APIs are exported from the package root, including `SessionStore`, `HorizonStore`, `detectProject`, `runVerification`, and `computeCoherenceScore`.
+
+Run `parallax-claudecode doctor` for redacted Markdown or `parallax-claudecode doctor --json` for schema-versioned JSON. It checks actual Claude/Node versions, native registration/cache freshness, manifests and entrypoints, role declarations, config, canonical storage writeability, state/ledger/archive schemas, locks/queues, and package metadata. An unhealthy result includes remediation and exits nonzero.
 
 ## Documentation
 

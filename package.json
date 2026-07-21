@@ -1,13 +1,14 @@
 {
   "name": "parallax-claudecode",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Evidence-first protocol gates, verification, traces, Hyperplan, and durable Horizon orchestration for Claude Code",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
     "parallax-claudecode": "scripts/install.mjs",
-    "parallax-claudecode-mcp": "dist/mcp.js"
+    "parallax-claudecode-mcp": "dist/mcp.js",
+    "parallax-claudecode-doctor": "scripts/doctor.mjs"
   },
   "exports": {
     ".": {
@@ -28,6 +29,8 @@
     "scripts/install.mjs",
     "scripts/dev.mjs",
     "scripts/verify-package.mjs",
+    "scripts/release-proof.mjs",
+    "scripts/doctor.mjs",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"
@@ -35,6 +38,7 @@
   "engines": {
     "node": ">=20"
   },
+  "claudeCode": ">=2.1.215 <3",
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
@@ -42,9 +46,12 @@
     "test:watch": "vitest",
     "coverage": "vitest run --coverage",
     "verify:package": "node scripts/verify-package.mjs",
+    "release:proof": "node scripts/release-proof.mjs",
     "prepack": "npm run build",
     "install:local": "node scripts/install.mjs",
     "install:dry": "node scripts/install.mjs --dry-run",
+    "doctor": "node scripts/doctor.mjs",
+    "doctor:json": "node scripts/doctor.mjs --json",
     "dev": "node scripts/dev.mjs",
     "check": "npm run typecheck && npm run build && npm run coverage && npm run verify:package"
   },

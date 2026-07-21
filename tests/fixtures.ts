@@ -32,6 +32,11 @@ export function feature(overrides: Partial<HorizonFeature> = {}): HorizonFeature
     attempts: 0,
     maxAttempts: 3,
     verification: { passed: false, testResults: null, issues: [], score: null, featureDigest: null },
+    evidence: {
+      worker: { childRunId: null, startedAt: null, completedAt: null, receipt: null, summary: null, traceId: null },
+      auditor: { childRunId: null, startedAt: null, completedAt: null, verdict: null, summary: null, traceId: null },
+      history: [],
+    },
     skillsRequired: [],
     skillsGenerated: [],
     ...overrides,

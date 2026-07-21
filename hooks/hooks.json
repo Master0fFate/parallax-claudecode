@@ -27,12 +27,25 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Write|Edit|NotebookEdit|Bash",
+        "matcher": "Write|Edit|NotebookEdit|Bash|Agent|mcp__plugin_parallax-claudecode_parallax__.*",
         "hooks": [
           {
             "type": "command",
             "command": "node",
             "args": ["${CLAUDE_PLUGIN_ROOT}/dist/hook.js", "PreToolUse"],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Agent|mcp__plugin_parallax-claudecode_parallax__horizon_observe_receipt|mcp__plugin_parallax-claudecode_parallax__horizon_record_audit|mcp__plugin_parallax-claudecode_parallax__horizon_recover_active_child",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/dist/hook.js", "PostToolUse"],
             "timeout": 10
           }
         ]
@@ -52,7 +65,7 @@
     ],
     "PostToolUseFailure": [
       {
-        "matcher": "Write|Edit|NotebookEdit|Bash",
+        "matcher": "Write|Edit|NotebookEdit|Bash|Agent",
         "hooks": [
           {
             "type": "command",
@@ -65,11 +78,25 @@
     ],
     "SubagentStart": [
       {
+        "matcher": "^parallax-claudecode:horizon-(worker|auditor)$",
         "hooks": [
           {
             "type": "command",
             "command": "node",
             "args": ["${CLAUDE_PLUGIN_ROOT}/dist/hook.js", "SubagentStart"],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "^parallax-claudecode:horizon-(worker|auditor)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/dist/hook.js", "SubagentStop"],
             "timeout": 10
           }
         ]
@@ -82,6 +109,18 @@
             "type": "command",
             "command": "node",
             "args": ["${CLAUDE_PLUGIN_ROOT}/dist/hook.js", "PreCompact"],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/dist/hook.js", "PostCompact"],
             "timeout": 10
           }
         ]

@@ -43,6 +43,11 @@ function plan(sessionId: string): HorizonPlan {
         id: "f1", name: "State", description: "", acceptanceCriteria: "State is isolated", protocolLevel: "full",
         status: "pending", order: 1, subAgentSessionId: null, attempts: 0, maxAttempts: 3,
         verification: { passed: false, testResults: null, issues: [], score: null, featureDigest: null }, skillsRequired: [], skillsGenerated: [],
+      evidence: {
+        worker: { childRunId: null, startedAt: null, completedAt: null, receipt: null, summary: null, traceId: null },
+        auditor: { childRunId: null, startedAt: null, completedAt: null, verdict: null, summary: null, traceId: null },
+        history: [],
+      },
       }],
     }],
     skills: { global: [], sessionScoped: [] },
@@ -93,7 +98,7 @@ describe("session-safe core", () => {
     const state = createSessionState("trace-validation", temporary())
     const verification = createVerificationRecord({ command: "test", files: ["a.ts"], verdict: "pass", exitCode: 0, durationMs: 1, stdout: "ok", stderr: "" })
     addWriteBatch(state.trace, ["a.ts", "b.ts"], "Edit", verification, 3)
-    expect(state.trace.session.agentVersion).toBe("0.1.1")
+    expect(state.trace.session.agentVersion).toBe("0.2.0")
     expect(validateSessionState(structuredClone(state))).toBeTruthy()
     const priorPatch = structuredClone(state)
     priorPatch.trace.session.agentVersion = "0.1.0"
@@ -102,7 +107,7 @@ describe("session-safe core", () => {
     badPhase.trace.phases.push({ phase: "summary", timestamp: "not-a-date", data: {} })
     expect(() => validateSessionState(badPhase)).toThrow(/phase record/)
     const badVerification = structuredClone(state)
-    badVerification.trace.verifications[0]!.exitCode = 7
+    ;(badVerification.trace.verifications[0]! as unknown as { exitCode: number | null }).exitCode = 7
     expect(() => validateSessionState(badVerification)).toThrow(/verdict and exitCode/)
     const missingReference = structuredClone(state)
     missingReference.trace.writes[0]!.verificationId = "missing"
@@ -163,11 +168,11 @@ describe("validated Horizon persistence", () => {
     expect(() => validateHorizonPlan({ ...good, milestones: [{ ...good.milestones[0], features: [{ ...good.milestones[0]!.features[0], status: "wat" }] }] })).toThrow(/status/)
   })
 
-  it("upgrades same-schema passing Horizon records with a bound feature digest", () => {
+  it("keeps score-only compatibility advisory and non-ready", () => {
     const legacy = plan("legacy-passing")
     legacy.milestones[0]!.features[0]!.verification = { passed: true, score: 80, testResults: "legacy npm test passed", issues: [], featureDigest: null }
     const upgraded = validateHorizonPlan(legacy)
-    expect(upgraded.milestones[0]!.features[0]!.verification.featureDigest).toMatch(/^[a-f0-9]{64}$/)
+    expect(upgraded.milestones[0]!.features[0]!).toMatchObject({ status: "pending", evidence: { worker: { receipt: null }, auditor: { verdict: null } } })
   })
 
   it("keeps Horizon sessions isolated and emits YAML-safe skill metadata", () => {

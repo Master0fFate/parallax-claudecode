@@ -35,7 +35,9 @@ jobs:
           node-version: 20
       - run: npm ci --ignore-scripts
       - run: npm run build
-      - name: Install Claude Code
-        run: npm install --global @anthropic-ai/claude-code
+      - name: Install Claude Code 2.1.215
+        run: npm install --global @anthropic-ai/claude-code@2.1.215
       - run: claude plugin validate --strict .claude-plugin/plugin.json
       - run: claude plugin validate --strict .claude-plugin/marketplace.json
+      - name: Prove packed artifact (authenticated model turns are advisory)
+        run: npm run release:proof

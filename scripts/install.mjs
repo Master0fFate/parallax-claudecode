@@ -6,20 +6,26 @@ import { spawnSync } from "node:child_process"
 import { fileURLToPath } from "node:url"
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..")
-const args = process.argv.slice(2)
+let args = process.argv.slice(2)
+const action = ["doctor", "status", "uninstall"].includes(args[0]) ? args.shift() : "install"
 const allowedScopes = new Set(["user", "project", "local"])
 let scope = "user"
 let dryRun = false
+let keepData = false
 
 for (let index = 0; index < args.length; index += 1) {
   const arg = args[index]
   if (arg === "--dry-run") {
     dryRun = true
+  } else if (arg === "--json" && (action === "doctor" || action === "status")) {
+    // Parsed by the doctor action below.
+  } else if (arg === "--keep-data" && action === "uninstall") {
+    keepData = true
   } else if (arg === "--scope") {
     scope = args[index + 1] ?? ""
     index += 1
   } else if (arg === "--help" || arg === "-h") {
-    console.log("Usage: parallax-claudecode [--scope user|project|local] [--dry-run]")
+    console.log("Usage: parallax-claudecode [doctor|status [--json]|uninstall [--keep-data]] [--scope user|project|local] [--dry-run]")
     process.exit(0)
   } else {
     console.error(`[parallax] unknown argument: ${arg}`)
@@ -31,13 +37,32 @@ if (!allowedScopes.has(scope)) {
   console.error(`[parallax] invalid scope '${scope}'; expected user, project, or local`)
   process.exit(2)
 }
-if (!existsSync(join(root, "dist", "mcp.js")) || !existsSync(join(root, "dist", "hook.js"))) {
-  console.error("[parallax] dist is missing; run npm run build before local installation")
-  process.exit(1)
+if (action === "doctor" || action === "status") {
+  const { formatDoctorMarkdown, runDoctor } = await import("../dist/doctor.js")
+  try {
+    const report = runDoctor({ packageRoot: root, projectRoot: process.cwd() })
+    console.log(args.includes("--json") ? JSON.stringify(report, null, 2) : formatDoctorMarkdown(report))
+    process.exit(report.healthy ? 0 : 1)
+  } catch {
+    console.error(args.includes("--json") ? JSON.stringify({ schemaVersion: 1, healthy: false, error: "Doctor failed safely on malformed runtime or filesystem input." }) : "[parallax] doctor failed safely; reinstall the package and retry")
+    process.exit(1)
+  }
 }
 
 const executable = process.platform === "win32" ? "claude.exe" : "claude"
 const workdir = process.env.INIT_CWD || process.cwd()
+const display = (command) => ["claude", ...command].map((part) => /\s|["']/.test(part) ? JSON.stringify(part) : part).join(" ")
+if (action === "uninstall") {
+  const command = ["plugin", "uninstall", "parallax-claudecode@parallax-local", "--scope", scope, ...(keepData ? ["--keep-data"] : [])]
+  if (dryRun) { console.log(`[parallax] would run: ${display(command)}`); process.exit(0) }
+  const result = spawnSync(executable, command, { cwd: workdir, stdio: "inherit" })
+  if (result.error?.code === "ENOENT") console.error("[parallax] Claude Code executable not found; install it or add it to PATH")
+  process.exit(result.status ?? 1)
+}
+if (!existsSync(join(root, "dist", "mcp.js")) || !existsSync(join(root, "dist", "hook.js"))) {
+  console.error("[parallax] dist is missing; run npm run build before local installation")
+  process.exit(1)
+}
 const commands = [
   ["plugin", "marketplace", "add", root, "--scope", scope],
   ["plugin", "install", "parallax-claudecode@parallax-local", "--scope", scope],
@@ -46,7 +71,8 @@ const commands = [
 console.log(`[parallax] plugin root: ${root}`)
 console.log(`[parallax] install scope: ${scope}`)
 if (dryRun) {
-  for (const command of commands) console.log(`[parallax] would run: claude ${command.join(" ")}`)
+  for (const command of commands) console.log(`[parallax] would run: ${display(command)}`)
+  console.log("[parallax] existing native registrations are updated in place; no settings files or plugin data are edited directly")
   process.exit(0)
 }
 

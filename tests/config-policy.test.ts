@@ -58,15 +58,17 @@ describe("validated project policy", () => {
     await dispatchHook("SessionStart", { session_id: sessionId, cwd: root })
     expect(await dispatchHook("PreToolUse", { session_id: sessionId, cwd: root, tool_name: "Write" })).toMatchObject({ hookSpecificOutput: { permissionDecision: "deny" } })
     complete(root, sessionId, ["ambiguity"])
-    expect((await dispatchHook("PreToolUse", { session_id: sessionId, cwd: root, tool_name: "Write" }) as { hookSpecificOutput: Record<string, unknown> }).hookSpecificOutput.permissionDecision).toBeUndefined()
+    expect((await dispatchHook("PreToolUse", { session_id: sessionId, cwd: root, tool_name: "Write", tool_use_id: "soft-probe", tool_input: { file_path: "probe.ts" } }) as { hookSpecificOutput: Record<string, unknown> }).hookSpecificOutput.permissionDecision).toBeUndefined()
+    await dispatchHook("PostToolUseFailure", { session_id: sessionId, cwd: root, tool_name: "Write", tool_use_id: "soft-probe", tool_input: { file_path: "probe.ts" }, error: "permission denied" })
     for (const file of ["one", "two", "three"]) {
-      await dispatchHook("PostToolBatch", { session_id: sessionId, cwd: root, tool_calls: [{ tool_name: "Write", tool_input: { file_path: `${file}.ts` } }] })
+      await dispatchHook("PreToolUse", { session_id: sessionId, cwd: root, tool_name: "Write", tool_use_id: file, tool_input: { file_path: `${file}.ts` } })
+      await dispatchHook("PostToolBatch", { session_id: sessionId, cwd: root, tool_calls: [{ tool_use_id: file, tool_name: "Write", tool_input: { file_path: `${file}.ts` }, tool_response: "File written" }] })
     }
     const blocked = await dispatchHook("PreToolUse", { session_id: sessionId, cwd: root, tool_name: "Bash" })
     expect(blocked).toMatchObject({ hookSpecificOutput: { permissionDecision: "deny" } })
     expect(JSON.stringify(blocked)).toContain("invariants")
     complete(root, sessionId, ["invariants"])
-    expect((await dispatchHook("PreToolUse", { session_id: sessionId, cwd: root, tool_name: "Bash" }) as { hookSpecificOutput: Record<string, unknown> }).hookSpecificOutput.permissionDecision).toBeUndefined()
+    expect((await dispatchHook("PreToolUse", { session_id: sessionId, cwd: root, tool_name: "Bash", tool_use_id: "bash-after-invariants", tool_input: { command: "echo ok" } }) as { hookSpecificOutput: Record<string, unknown> }).hookSpecificOutput.permissionDecision).toBeUndefined()
   })
 
   it("counts the soft invariant limit by mutation batch rather than file records", async () => {
@@ -75,13 +77,16 @@ describe("validated project policy", () => {
     const sessionId = "soft-batches"
     await dispatchHook("SessionStart", { session_id: sessionId, cwd: root })
     complete(root, sessionId, ["ambiguity"])
+    for (const file of ["one", "two", "three", "four"]) {
+      await dispatchHook("PreToolUse", { session_id: sessionId, cwd: root, tool_name: "Write", tool_use_id: file, tool_input: { file_path: `${file}.ts` } })
+    }
     await dispatchHook("PostToolBatch", {
       session_id: sessionId, cwd: root,
-      tool_calls: ["one", "two", "three", "four"].map((file) => ({ tool_name: "Write", tool_input: { file_path: `${file}.ts` } })),
+      tool_calls: ["one", "two", "three", "four"].map((file) => ({ tool_use_id: file, tool_name: "Write", tool_input: { file_path: `${file}.ts` }, tool_response: "File written" })),
     })
     const state = new SessionStore(root).read(sessionId)!
     expect(new Set(state.trace.writes.map((write) => write.batchId)).size).toBe(1)
-    expect((await dispatchHook("PreToolUse", { session_id: sessionId, cwd: root, tool_name: "Write" }) as { hookSpecificOutput: Record<string, unknown> }).hookSpecificOutput.permissionDecision).toBeUndefined()
+    expect((await dispatchHook("PreToolUse", { session_id: sessionId, cwd: root, tool_name: "Write", tool_use_id: "batch-probe", tool_input: { file_path: "probe.ts" } }) as { hookSpecificOutput: Record<string, unknown> }).hookSpecificOutput.permissionDecision).toBeUndefined()
   })
 
   it("enforces designDocRequired in every mode with the ordered prerequisite chain", async () => {
@@ -93,7 +98,7 @@ describe("validated project policy", () => {
     const blocked = await dispatchHook("PreToolUse", { session_id: sessionId, cwd: root, tool_name: "Edit" })
     expect(JSON.stringify(blocked)).toContain("design")
     complete(root, sessionId, ["design"])
-    expect((await dispatchHook("PreToolUse", { session_id: sessionId, cwd: root, tool_name: "Edit" }) as { hookSpecificOutput: Record<string, unknown> }).hookSpecificOutput.permissionDecision).toBeUndefined()
+    expect((await dispatchHook("PreToolUse", { session_id: sessionId, cwd: root, tool_name: "Edit", tool_use_id: "design-edit", tool_input: { file_path: "design.ts" } }) as { hookSpecificOutput: Record<string, unknown> }).hookSpecificOutput.permissionDecision).toBeUndefined()
   })
 
   it("grants one bounded repair mutation after an exhausted manual verification", async () => {
@@ -103,19 +108,20 @@ describe("validated project policy", () => {
     const sessionId = "repair-budget"
     await dispatchHook("SessionStart", { session_id: sessionId, cwd: root })
     complete(root, sessionId, ["ambiguity", "invariants", "gate"])
-    await dispatchHook("PostToolBatch", { session_id: sessionId, cwd: root, tool_calls: [{ tool_name: "Write", tool_input: { file_path: "broken.ts" } }] })
+    await dispatchHook("PreToolUse", { session_id: sessionId, cwd: root, tool_name: "Write", tool_use_id: "initial-failure", tool_input: { file_path: "broken.ts" } })
+    await dispatchHook("PostToolBatch", { session_id: sessionId, cwd: root, tool_calls: [{ tool_use_id: "initial-failure", tool_name: "Write", tool_input: { file_path: "broken.ts" }, tool_response: "File written" }] })
     expect(new SessionStore(root).read(sessionId)!.friction.retriesLeft).toBe(0)
     expect(await dispatchHook("PreToolUse", { session_id: sessionId, cwd: root, tool_name: "Edit" })).toMatchObject({ hookSpecificOutput: { permissionDecision: "deny" } })
     const server = new ParallaxMcpServer({ projectRoot: root, horizonRoot: workspace("repair-horizon").root })
     expect((await server.callTool("parallax_verify", { sessionId })).isError).not.toBe(true)
     expect(new SessionStore(root).read(sessionId)!.friction.repairWritesRemaining).toBe(1)
-    expect((await dispatchHook("PreToolUse", { session_id: sessionId, cwd: root, tool_name: "Edit" }) as { hookSpecificOutput: Record<string, unknown> }).hookSpecificOutput.permissionDecision).toBeUndefined()
+    expect((await dispatchHook("PreToolUse", { session_id: sessionId, cwd: root, tool_name: "Edit", tool_use_id: "failed-edit", tool_input: { file_path: "broken.ts" } }) as { hookSpecificOutput: Record<string, unknown> }).hookSpecificOutput.permissionDecision).toBeUndefined()
     expect(new SessionStore(root).read(sessionId)!.friction.repairWritesRemaining).toBe(1)
-    await dispatchHook("PostToolUseFailure", { session_id: sessionId, cwd: root, tool_name: "Edit", error: "permission denied" })
-    expect((await dispatchHook("PreToolUse", { session_id: sessionId, cwd: root, tool_name: "Edit" }) as { hookSpecificOutput: Record<string, unknown> }).hookSpecificOutput.permissionDecision).toBeUndefined()
+    await dispatchHook("PostToolUseFailure", { session_id: sessionId, cwd: root, tool_name: "Edit", tool_use_id: "failed-edit", tool_input: { file_path: "broken.ts" }, error: "permission denied" })
+    expect((await dispatchHook("PreToolUse", { session_id: sessionId, cwd: root, tool_name: "Edit", tool_use_id: "repair-edit", tool_input: { file_path: "broken.ts" } }) as { hookSpecificOutput: Record<string, unknown> }).hookSpecificOutput.permissionDecision).toBeUndefined()
     expect(new SessionStore(root).read(sessionId)!.friction.repairWritesRemaining).toBe(1)
     writeFileSync(join(root, "package.json"), JSON.stringify({ scripts: { check: "node -e \"process.exit(0)\"" } }))
-    await dispatchHook("PostToolBatch", { session_id: sessionId, cwd: root, tool_calls: [{ tool_name: "Edit", tool_input: { file_path: "broken.ts" } }] })
+    await dispatchHook("PostToolBatch", { session_id: sessionId, cwd: root, tool_calls: [{ tool_use_id: "repair-edit", tool_name: "Edit", tool_input: { file_path: "broken.ts" }, tool_response: "File updated" }] })
     expect(new SessionStore(root).read(sessionId)!.friction).toMatchObject({ retriesLeft: 1, repairWritesRemaining: 0 })
   })
 

@@ -12,7 +12,7 @@ import {
   type VerificationVerdict,
 } from "./types.js"
 
-const AGENT_VERSION = "0.1.1"
+const AGENT_VERSION = "0.2.0"
 const SUPPORTED_AGENT_VERSIONS = new Set(["0.1.0", AGENT_VERSION])
 
 export function createTrace(sessionId: string, project: string, projectType: ProjectType = null): ParallaxTrace {
@@ -41,10 +41,91 @@ function object(value: unknown): value is Record<string, unknown> {
 
 const PHASES = new Set<PhaseName>(["ambiguity_check", "four_invariants", "verification_gate", "design_check", "mode_switch", "execution", "commit_decision", "summary"])
 const PROJECT_TYPES = new Set(["cargo", "go", "node", "python", "dotnet", null])
-const VERDICTS = new Set(["pass", "fail", "skipped"])
+const VERDICTS = new Set(["pass", "fail", "skipped", "unknown"])
+const VERIFICATION_SOURCES = new Set(["manual", "automatic"])
+const VERIFICATION_RECORD_KEYS = new Set([
+  "schemaVersion", "id", "sessionId", "source", "startedAt", "command", "args", "cwd", "timeoutMs",
+  "durationMs", "exitCode", "verdict", "changedFiles", "stdout", "stderr", "combined", "outputTruncated",
+  "timedOut", "skipReason",
+])
 function timestamp(value: unknown): value is string { return typeof value === "string" && Number.isFinite(Date.parse(value)) }
 function finite(value: unknown, minimum = 0): value is number { return typeof value === "number" && Number.isFinite(value) && value >= minimum }
 function integer(value: unknown, minimum = 0): value is number { return finite(value, minimum) && Number.isInteger(value) }
+
+function strings(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string")
+}
+
+function normalizedFiles(files: readonly string[]): string[] {
+  const unique = new Set(files.map((file) => file.trim().replaceAll("\\", "/").replace(/^\.\//, "")).filter(Boolean))
+  return [...unique].sort((left, right) => left < right ? -1 : left > right ? 1 : 0)
+}
+
+/** Returns a detached, deeply immutable canonical receipt after validating its evidence. */
+export function validateVerificationRecord(value: unknown): VerificationRecord {
+  if (!object(value) || Object.keys(value).length !== VERIFICATION_RECORD_KEYS.size
+    || Object.keys(value).some((key) => !VERIFICATION_RECORD_KEYS.has(key))
+    || value.schemaVersion !== 2 || typeof value.id !== "string" || !value.id
+    || typeof value.sessionId !== "string" || !value.sessionId || !VERIFICATION_SOURCES.has(value.source as string)
+    || !timestamp(value.startedAt) || (value.command !== null && (typeof value.command !== "string" || !value.command.trim()))
+    || !strings(value.args) || typeof value.cwd !== "string" || !value.cwd || !integer(value.timeoutMs)
+    || !finite(value.durationMs) || (value.exitCode !== null && !Number.isInteger(value.exitCode))
+    || !VERDICTS.has(value.verdict as VerificationVerdict) || !strings(value.changedFiles)
+    || typeof value.stdout !== "string" || typeof value.stderr !== "string" || typeof value.combined !== "string"
+    || typeof value.outputTruncated !== "boolean" || typeof value.timedOut !== "boolean"
+    || (value.skipReason !== null && typeof value.skipReason !== "string")) throw new Error("Invalid schema-v2 verification receipt")
+  if (JSON.stringify(value.changedFiles) !== JSON.stringify(normalizedFiles(value.changedFiles))) throw new Error("Verification changedFiles are not normalized, unique, and ordered")
+  const hasReason = typeof value.skipReason === "string" && Boolean(value.skipReason.trim())
+  if (value.verdict === "pass" && (!value.command || value.exitCode !== 0 || value.timedOut || value.skipReason !== null)) throw new Error("Pass receipt has contradictory verdict and exitCode evidence")
+  if (value.verdict === "fail" && (!value.command || value.exitCode === null || value.exitCode === 0 || value.timedOut || value.skipReason !== null)) throw new Error("Fail receipt has contradictory verdict and exitCode evidence")
+  if (value.verdict === "skipped" && (value.command !== null || value.args.length > 0 || value.exitCode !== null || value.timedOut || !hasReason)) throw new Error("Skipped receipt has contradictory evidence")
+  if (value.verdict === "unknown" && (!value.command || value.exitCode !== null || !hasReason)) throw new Error("Unknown receipt requires a command, null exitCode, and explicit reason")
+  const canonical = {
+    ...value,
+    args: Object.freeze([...(value.args as string[])]),
+    changedFiles: Object.freeze([...(value.changedFiles as string[])]),
+  } as unknown as VerificationRecord
+  return compatibilityAliases(canonical)
+}
+
+function compatibilityAliases(record: VerificationRecord): VerificationRecord {
+  Object.defineProperties(record, {
+    timestamp: { configurable: true, get: () => record.startedAt },
+    files: { configurable: true, get: () => record.changedFiles },
+  })
+  return Object.freeze(record)
+}
+
+/** Explicitly upgrades persisted trace-v1 evidence without presenting indeterminate outcomes as pass/fail. */
+export function migrateVerificationRecordV1(value: unknown, sessionId: string, cwd: string): VerificationRecord {
+  if (!object(value) || typeof value.id !== "string" || !value.id || !timestamp(value.timestamp)
+    || (value.command !== null && typeof value.command !== "string") || !strings(value.files)
+    || !new Set(["pass", "fail", "skipped"]).has(value.verdict as string)
+    || (value.exitCode !== null && !Number.isInteger(value.exitCode)) || !finite(value.durationMs)
+    || typeof value.stdout !== "string" || typeof value.stderr !== "string") throw new Error("Invalid trace-v1 verification record")
+  const indeterminate = /timed? out|timeout|cancel|abort|spawn|enoent/i.test(`${value.stdout}\n${value.stderr}`)
+  let verdict = value.verdict as VerificationVerdict
+  let timedOut = /timed? out|timeout/i.test(`${value.stdout}\n${value.stderr}`)
+  let reason: string | null = null
+  if (indeterminate && value.command) {
+    verdict = "unknown"
+    reason = `Migrated trace-v1 indeterminate result: ${(value.stderr || value.stdout).trim() || "reason unavailable"}`
+  } else if (verdict === "skipped") {
+    reason = value.stderr.trim() || "Migrated trace-v1 record did not include a skip reason."
+  }
+  const coherentPass = verdict === "pass" && Boolean(value.command) && value.exitCode === 0
+  const coherentFail = verdict === "fail" && Boolean(value.command) && typeof value.exitCode === "number" && value.exitCode !== 0
+  if (!coherentPass && !coherentFail && verdict !== "skipped" && verdict !== "unknown") {
+    verdict = "unknown"
+    reason = "Migrated trace-v1 record contained contradictory verdict evidence."
+  }
+  return validateVerificationRecord({
+    schemaVersion: 2, id: value.id, sessionId, source: "automatic", startedAt: value.timestamp,
+    command: value.command, args: [], cwd, timeoutMs: 0, durationMs: value.durationMs, exitCode: verdict === "unknown" ? null : value.exitCode,
+    verdict, changedFiles: normalizedFiles(value.files), stdout: value.stdout, stderr: value.stderr,
+    combined: [value.stdout, value.stderr].filter(Boolean).join("\n"), outputTruncated: false, timedOut, skipReason: reason,
+  })
+}
 
 /** Rejects every malformed or foreign nested trace field instead of trusting a cast. */
 export function validateTrace(value: unknown, expectedSessionId?: string, expectedMaxRetries?: number): ParallaxTrace {
@@ -69,18 +150,15 @@ export function validateTrace(value: unknown, expectedSessionId?: string, expect
   }
   const verificationIds = new Set<string>()
   const verificationById = new Map<string, VerificationRecord>()
-  for (const verification of value.verifications) {
-    if (!object(verification) || typeof verification.id !== "string" || !verification.id || verificationIds.has(verification.id)
-      || !timestamp(verification.timestamp) || (verification.command !== null && typeof verification.command !== "string")
-      || !Array.isArray(verification.files) || !verification.files.every((file) => typeof file === "string")
-      || !VERDICTS.has(verification.verdict as VerificationVerdict)
-      || (verification.exitCode !== null && !Number.isInteger(verification.exitCode)) || !finite(verification.durationMs)
-      || typeof verification.stdout !== "string" || typeof verification.stderr !== "string") throw new Error("Invalid verification record")
-    if ((verification.verdict === "pass" && verification.exitCode !== 0)
-      || (verification.verdict === "fail" && (verification.exitCode === null || verification.exitCode === 0))
-      || (verification.verdict === "skipped" && verification.exitCode !== null)) throw new Error("Verification verdict and exitCode are inconsistent")
+  for (let index = 0; index < value.verifications.length; index += 1) {
+    const candidate = value.verifications[index]
+    const verification = object(candidate) && candidate.schemaVersion === 2
+      ? validateVerificationRecord(candidate)
+      : migrateVerificationRecordV1(candidate, session.id as string, session.project as string)
+    value.verifications[index] = verification
+    if (verificationIds.has(verification.id)) throw new Error("Duplicate verification receipt ID")
     verificationIds.add(verification.id)
-    verificationById.set(verification.id, verification as unknown as VerificationRecord)
+    verificationById.set(verification.id, verification)
   }
   const batches = new Map<string, { verificationId: unknown; verification: unknown; timestamp: unknown; tool: unknown; frictionRetriesLeft: unknown }>()
   for (const write of value.writes) {
@@ -142,7 +220,7 @@ export function addWriteBatch(
   tool: string,
   verification: VerificationRecord | null,
   frictionRetriesLeft: number,
-  batchId = randomUUID(),
+  batchId: string = randomUUID(),
 ): string {
   invalidateTrace(trace)
   const uniqueFiles = [...new Set(files.map((file) => file.trim()).filter(Boolean))]
@@ -222,10 +300,21 @@ export function loadTrace(path: string, expectedSessionId?: string): ParallaxTra
   return validateTrace(JSON.parse(readFileSync(path, "utf8")), expectedSessionId)
 }
 
-export function createVerificationRecord(input: Omit<VerificationRecord, "id" | "timestamp">): VerificationRecord {
-  return { id: randomUUID(), timestamp: new Date().toISOString(), ...input }
+type VerificationInput = Omit<VerificationRecord, "schemaVersion" | "id" | "startedAt" | "timestamp" | "files">
+type LegacyVerificationInput = {
+  command: string | null; files: readonly string[]; verdict: Exclude<VerificationVerdict, "unknown">; exitCode: number | null
+  durationMs: number; stdout: string; stderr: string
+}
+
+export function createVerificationRecord(input: VerificationInput, identity?: { id?: string; startedAt?: string }): VerificationRecord
+export function createVerificationRecord(input: LegacyVerificationInput, identity?: { id?: string; startedAt?: string }): VerificationRecord
+export function createVerificationRecord(input: VerificationInput | LegacyVerificationInput, identity: { id?: string; startedAt?: string } = {}): VerificationRecord {
+  if ("files" in input) {
+    return migrateVerificationRecordV1({ id: identity.id ?? randomUUID(), timestamp: identity.startedAt ?? new Date().toISOString(), ...input }, "legacy-api", process.cwd())
+  }
+  return validateVerificationRecord({ schemaVersion: 2, id: identity.id ?? randomUUID(), startedAt: identity.startedAt ?? new Date().toISOString(), ...input })
 }
 
 export function verdictForExitCode(exitCode: number | null): VerificationVerdict {
-  return exitCode === null ? "skipped" : exitCode === 0 ? "pass" : "fail"
+  return exitCode === null ? "unknown" : exitCode === 0 ? "pass" : "fail"
 }

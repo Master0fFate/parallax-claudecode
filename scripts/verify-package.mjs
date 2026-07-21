@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFileSync } from "node:fs"
+import { readFileSync, readdirSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { spawnSync } from "node:child_process"
 import { fileURLToPath } from "node:url"
@@ -28,11 +28,11 @@ const required = [
   ".claude-plugin/marketplace.json",
   ".mcp.json",
   "hooks/hooks.json",
-  "agents/parallax.md",
-  "agents/horizon.md",
+  ...readdirSync(join(root, "agents"), { withFileTypes: true }).filter((entry) => entry.isFile() && entry.name.endsWith(".md")).map((entry) => `agents/${entry.name}`),
   "commands/parallax-status.md",
   "dist/hook.js",
   "dist/mcp.js",
+  "dist/doctor.js",
   "README.md",
   "CHANGELOG.md",
   "LICENSE",
@@ -45,8 +45,9 @@ const required = [
   "scripts/install.mjs",
   "scripts/dev.mjs",
   "scripts/verify-package.mjs",
-  ...["parallax-core", "check-in", "plan", "build", "debug", "horizon", "hyperplan", "trace", "status"]
-    .map((name) => `skills/${name}/SKILL.md`),
+  "scripts/release-proof.mjs",
+  "scripts/doctor.mjs",
+  ...readdirSync(join(root, "skills"), { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => `skills/${entry.name}/SKILL.md`),
 ]
 const missing = required.filter((path) => !files.has(path))
 if (missing.length > 0) {
@@ -68,8 +69,26 @@ const plugin = JSON.parse(readFileSync(join(root, ".claude-plugin", "plugin.json
 const marketplace = JSON.parse(readFileSync(join(root, ".claude-plugin", "marketplace.json"), "utf8"))
 const lock = JSON.parse(readFileSync(join(root, "package-lock.json"), "utf8"))
 const listing = marketplace.plugins?.find((entry) => entry.name === manifest.name)
+if (!/^sha512-[A-Za-z0-9+/]+={0,2}$/.test(report.integrity ?? "") || !/^[a-f0-9]{40}$/.test(report.shasum ?? "")) {
+  console.error("[package] npm archive integrity metadata is missing or malformed")
+  process.exit(1)
+}
+if (!manifest.author || !manifest.license || !manifest.repository?.url) {
+  console.error("[package] package ownership metadata (author, license, repository) is incomplete")
+  process.exit(1)
+}
+const unsafeModes = report.files.filter((entry) => typeof entry.mode !== "number" || (entry.mode & 0o022) !== 0)
+if (unsafeModes.length > 0) {
+  console.error(`[package] archive entries are group/world writable or have unknown ownership mode:\n${unsafeModes.map((entry) => `  - ${entry.path}`).join("\n")}`)
+  process.exit(1)
+}
 if (plugin.name !== manifest.name || plugin.version !== manifest.version || listing?.version !== manifest.version || lock.version !== manifest.version || lock.packages?.[""]?.version !== manifest.version) {
   console.error("[package] package, lockfile, plugin, and marketplace name/version metadata must match")
+  process.exit(1)
+}
+const orderedEntries = (value) => Object.entries(value ?? {}).sort(([left], [right]) => left.localeCompare(right))
+if (JSON.stringify(orderedEntries(lock.packages?.[""]?.bin)) !== JSON.stringify(orderedEntries(manifest.bin)) || lock.packages?.[""]?.engines?.node !== manifest.engines?.node) {
+  console.error("[package] lockfile bin or engine metadata does not match package.json")
   process.exit(1)
 }
 const runtimeVersions = {
@@ -82,7 +101,7 @@ for (const [runtime, marker] of Object.entries(runtimeVersions)) {
     process.exit(1)
   }
 }
-for (const agentName of ["parallax", "horizon"]) {
+for (const agentName of required.filter((entry) => entry.startsWith("agents/")).map((entry) => entry.slice(7, -3))) {
   const agent = readFileSync(join(root, "agents", `${agentName}.md`), "utf8")
   if (!new RegExp(`^name: ${agentName}$`, "m").test(agent)) {
     console.error(`[package] agent frontmatter name is inconsistent: ${agentName}`)

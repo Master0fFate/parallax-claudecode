@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from "node:fs"
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { detectProject, getVerifyCommands, runVerification } from "../src/index.js"
@@ -94,13 +94,53 @@ describe("verification execution", () => {
     expect(result.stderr).toContain("expected failure")
   })
 
+  it("does not claim a thorough command when the total timeout is exhausted before spawn", async () => {
+    const root = workspace("verify-between-command-timeout").root
+    const marker = join(root, "must-not-run")
+    const first = nodeCommand("process.stdout.write('first completed')", "first")
+    const second = nodeCommand(`require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'bad')`, "unstarted")
+    const times = [1_000, 1_000, 61_001, 61_001]
+    const result = await runVerification(project(root), [], {
+      thorough: true,
+      timeoutMs: 60_000,
+      commands: [first, second],
+      now: () => times.shift() ?? 61_001,
+    })
+
+    expect(result).toMatchObject({
+      verdict: "unknown",
+      exitCode: null,
+      timedOut: true,
+      command: "first",
+      args: [first.command, ...first.args],
+      skipReason: "Verification timeout exhausted.",
+    })
+    expect(result.stdout).toContain("first completed")
+    expect(() => readFileSync(marker)).toThrow()
+  })
+
+  it("records synchronous spawn exceptions as unknown attempted-command evidence", async () => {
+    const root = workspace("verify-synchronous-spawn-error").root
+    const malformed = { command: "malformed\0executable", args: ["--flag"], label: "malformed" }
+    const result = await runVerification(project(root), [], { commands: [malformed] })
+
+    expect(result).toMatchObject({
+      verdict: "unknown",
+      exitCode: null,
+      timedOut: false,
+      command: malformed.label,
+      args: [malformed.command, ...malformed.args],
+    })
+    expect(result.skipReason).toMatch(/could not be spawned/i)
+  })
+
   it("times out and cancels commands without invoking a shell", async () => {
     const root = workspace("verify-timeout").root
     const timeout = await runVerification(project(root), [], {
       timeoutMs: 50,
       commands: [nodeCommand("setTimeout(() => {}, 10000)", "slow")],
     })
-    expect(timeout.verdict).toBe("fail")
+    expect(timeout).toMatchObject({ verdict: "unknown", exitCode: null, timedOut: true })
     expect(timeout.stderr).toContain("timed out")
 
     const controller = new AbortController()
@@ -109,6 +149,7 @@ describe("verification execution", () => {
       signal: controller.signal,
       commands: [nodeCommand("setTimeout(() => {}, 10000)", "cancel")],
     })
+    expect(cancelled).toMatchObject({ verdict: "unknown", exitCode: null, timedOut: false })
     expect(cancelled.stderr).toContain("cancelled")
   })
 

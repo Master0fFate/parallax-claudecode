@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 import { existsSync, readdirSync, readFileSync } from "node:fs"
-import { resolve } from "node:path"
-import { pathToFileURL } from "node:url"
+import { dirname, resolve } from "node:path"
+import { fileURLToPath, pathToFileURL } from "node:url"
 import { checkIn } from "./protocol.js"
 import { applyParallaxConfig, loadParallaxConfig } from "./config.js"
 import { detectProject } from "./detect.js"
+import { formatDoctorMarkdown, runDoctor } from "./doctor.js"
 import { featureVerificationDigest, HorizonStore } from "./horizon.js"
+import { HorizonDispatchStore } from "./horizon-dispatch.js"
+import { VerificationLedger } from "./ledger.js"
 import {
   assessComplexity,
   generateAllCrossAttacks,
@@ -20,6 +23,7 @@ import { runVerification } from "./verify.js"
 import type {
   AgentMode,
   HorizonAutonomyLevel,
+  HorizonAuditVerdict,
   HorizonConfig,
   HorizonDecision,
   HorizonFeature,
@@ -32,6 +36,7 @@ import type {
 } from "./types.js"
 
 const MCP_PROTOCOL_VERSION = "2024-11-05"
+const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 const SESSION_DESCRIPTION = "Claude session ID. Always pass it when known. If omitted, the sole stored session is used; multiple sessions produce an ambiguity error."
 const HORIZON_SESSION_DESCRIPTION = "Horizon session ID. Always pass it when known. If omitted, the sole Horizon session is used; multiple sessions produce an ambiguity error."
 const ITEM_STATUSES = ["pending", "in_progress", "completed", "failed"] as const
@@ -113,6 +118,7 @@ export class ParallaxMcpServer {
   readonly projectRoot: string
   readonly sessions: SessionStore
   readonly horizon: HorizonStore
+  readonly horizonDispatches: HorizonDispatchStore
   readonly tools: Map<string, ToolDefinition>
 
   constructor(options: McpServerOptions = {}) {
@@ -121,6 +127,7 @@ export class ParallaxMcpServer {
     this.sessions = new SessionStore(detectedRoot)
     this.projectRoot = this.sessions.projectRoot
     this.horizon = new HorizonStore(options.horizonRoot)
+    this.horizonDispatches = new HorizonDispatchStore(this.projectRoot)
     this.tools = new Map(this.createTools().map((tool) => [tool.name, tool]))
   }
 
@@ -146,7 +153,7 @@ export class ParallaxMcpServer {
     const id = value.id
     if (method.startsWith("notifications/")) return null
     if (method === "initialize") {
-      return { jsonrpc: "2.0", id, result: { protocolVersion: MCP_PROTOCOL_VERSION, capabilities: { tools: { listChanged: false } }, serverInfo: { name: "parallax-claudecode", version: "0.1.1" } } }
+      return { jsonrpc: "2.0", id, result: { protocolVersion: MCP_PROTOCOL_VERSION, capabilities: { tools: { listChanged: false } }, serverInfo: { name: "parallax-claudecode", version: "0.2.0" } } }
     }
     if (method === "ping") return { jsonrpc: "2.0", id, result: {} }
     if (method === "tools/list") return { jsonrpc: "2.0", id, result: { tools: this.listTools() } }
@@ -244,7 +251,8 @@ export class ParallaxMcpServer {
         const thorough = booleanArg(args, "thorough")
         // Never trust persisted cwd for command execution. Verification is bound to the
         // canonical project root selected when this server/store was constructed.
-        const result = await runVerification(detectProject(this.projectRoot), files, thorough === undefined ? {} : { thorough })
+        const result = await runVerification(detectProject(this.projectRoot), files, { ...(thorough === undefined ? {} : { thorough }), sessionId: id, source: "manual" })
+        new VerificationLedger(this.projectRoot).append(result)
         this.updateCore(id, (next) => {
           applyParallaxConfig(next, config)
           invalidateTrace(next.trace)
@@ -265,7 +273,7 @@ export class ParallaxMcpServer {
         })
         const output = result.verdict === "pass" ? result.stdout : result.stderr || result.stdout
         const recovery = exhausted && result.verdict === "fail" ? "\nOne bounded repair mutation is now authorized; repair the failure, then verify again." : ""
-        return `[parallax] VERIFICATION ${result.verdict.toUpperCase()}${result.exitCode === null ? "" : ` (exit ${result.exitCode})`}\nCommand: ${result.command ?? "none"}${recovery}\n${truncate(output, 4_000)}`.trim()
+        return `[parallax] VERIFICATION ${result.verdict.toUpperCase()}${result.exitCode === null ? "" : ` (exit ${result.exitCode})`}\nReceipt: ${result.id}\nCommand: ${result.command ?? "none"}${recovery}\n${truncate(output, 4_000)}`.trim()
       },
     })
 
@@ -342,13 +350,24 @@ export class ParallaxMcpServer {
     })
 
     add({
+      name: "parallax_doctor",
+      description: "Diagnose the installed package, native Claude lifecycle, entrypoints, configuration, storage, locks, queues, and role permissions.",
+      inputSchema: schema({ format: { type: "string", enum: ["markdown", "json"] } }),
+      execute: (args) => {
+        const report = runDoctor({ packageRoot: PACKAGE_ROOT, projectRoot: this.projectRoot })
+        return stringArg(args, "format", false) === "json" ? JSON.stringify(report, null, 2) : formatDoctorMarkdown(report)
+      },
+    })
+
+    add({
       name: "parallax_health",
       description: "Validate and inspect persisted state for a selected Claude session and report MCP server health.",
       inputSchema: schema({ sessionId: sessionProperty() }),
       execute: (args) => {
         const { id, state } = this.resolveCoreSession(args)
         const score = computeCoherenceScore(state.trace)
-        return [`## Parallax Health Check`, ``, `**Verdict:** HEALTHY`, `**Session ID:** \`${id}\``, `**Project root:** ${this.projectRoot}`, `**State file:** ${this.sessions.pathFor(id)}`, `**Mode:** ${state.mode}`, `**Schema:** ${state.schemaVersion}`, `**Coherence:** ${score.total}/100`, `**Retries remaining:** ${state.friction.retriesLeft}`, `**MCP tools:** ${this.tools.size}`].join("\n")
+        const report = runDoctor({ packageRoot: PACKAGE_ROOT, projectRoot: this.projectRoot })
+        return [`## Parallax Session Status`, ``, `**Doctor verdict:** ${report.healthy ? "HEALTHY" : "UNHEALTHY"}`, `**Session ID:** \`${id}\``, `**State:** \`<project>/.parallax/sessions/<safe-session-id>/state.json\``, `**Mode:** ${state.mode}`, `**Schema:** ${state.schemaVersion}`, `**Coherence (observed metric):** ${score.total}/100`, `**Retries remaining:** ${state.friction.retriesLeft}`, `**MCP tools discovered:** ${this.tools.size}`, ``, formatDoctorMarkdown(report)].join("\n")
       },
     })
 
@@ -437,7 +456,48 @@ export class ParallaxMcpServer {
       return `[horizon] Plan for ${id}\nStatus: ${plan.status}\nProgress: ${plan.stats.completedFeatures}/${plan.stats.totalFeatures}\n\n${JSON.stringify(plan, null, 2)}`
     } })
 
-    add({ name: "horizon_update_feature", description: "Update a feature status, sub-agent ID, and attempt count with retry-cap enforcement.", inputSchema: hSchema({ featureId: { type: "string" }, status: { type: "string", enum: ITEM_STATUSES }, subAgentSessionId: { type: "string" } }, ["featureId", "status"]), execute: (args) => {
+    add({ name: "horizon_begin_worker", description: "Atomically acquire the session child lease and begin one worker attempt for a pending Horizon feature.", inputSchema: hSchema({ featureId: { type: "string" }, childRunId: { type: "string" } }, ["featureId", "childRunId"]), execute: (args) => {
+      const id = resolveId(args); const featureId = stringArg(args, "featureId")!; const childRunId = stringArg(args, "childRunId")!
+      const plan = this.horizon.beginWorker(id, featureId, childRunId)
+      return `[horizon] Worker ${childRunId} began '${featureId}'. Attempt: ${plan.milestones.flatMap((item) => item.features).find((item) => item.id === featureId)!.attempts}.`
+    } })
+
+    add({ name: "horizon_observe_receipt", description: "Load one exact schema-v2 project ledger receipt after the assigned worker's durable dual-lifecycle dispatch completes.", inputSchema: hSchema({ parentSessionId: { type: "string" }, featureId: { type: "string" }, childRunId: { type: "string" }, receiptId: { type: "string" }, summary: { type: "string", maxLength: 2000 }, traceId: { type: "string" } }, ["parentSessionId", "featureId", "childRunId", "receiptId", "summary"]), execute: (args) => {
+      const id = resolveId(args); const parentSessionId = stringArg(args, "parentSessionId")!; const featureId = stringArg(args, "featureId")!; const childRunId = stringArg(args, "childRunId")!; const receiptId = stringArg(args, "receiptId")!
+      this.horizonDispatches.requireCompleted(parentSessionId, { horizonSessionId: id, featureId, role: "worker", childRunId })
+      const plan = this.horizon.observeReceipt(this.projectRoot, id, featureId, receiptId, stringArg(args, "summary")!, stringArg(args, "traceId", false) ?? null)
+      this.horizonDispatches.release(parentSessionId)
+      const verdict = plan.milestones.flatMap((item) => item.features).find((item) => item.id === featureId)!.evidence.worker.receipt!.verdict
+      return `[horizon] Receipt ${receiptId} observed for '${featureId}' with exact verdict ${verdict.toUpperCase()}.`
+    } })
+
+    add({ name: "horizon_begin_auditor", description: "Atomically acquire the session child lease for an independent auditor after a worker receipt is observed.", inputSchema: hSchema({ featureId: { type: "string" }, childRunId: { type: "string" } }, ["featureId", "childRunId"]), execute: (args) => {
+      const id = resolveId(args); const featureId = stringArg(args, "featureId")!; const childRunId = stringArg(args, "childRunId")!
+      this.horizon.beginAuditor(id, featureId, childRunId)
+      return `[horizon] Independent auditor ${childRunId} began '${featureId}'.`
+    } })
+
+    add({ name: "horizon_record_audit", description: "Record the assigned independent auditor verdict after its durable dual-lifecycle dispatch completes.", inputSchema: hSchema({ parentSessionId: { type: "string" }, featureId: { type: "string" }, childRunId: { type: "string" }, verdict: { type: "string", enum: ["accept", "corrective-worker"] }, summary: { type: "string", maxLength: 2000 }, traceId: { type: "string" } }, ["parentSessionId", "featureId", "childRunId", "verdict", "summary"]), execute: (args) => {
+      const id = resolveId(args); const parentSessionId = stringArg(args, "parentSessionId")!; const featureId = stringArg(args, "featureId")!; const childRunId = stringArg(args, "childRunId")!; const verdict = stringArg(args, "verdict") as HorizonAuditVerdict
+      this.horizonDispatches.requireCompleted(parentSessionId, { horizonSessionId: id, featureId, role: "auditor", childRunId })
+      const plan = this.horizon.recordAudit(id, featureId, childRunId, verdict, stringArg(args, "summary")!, stringArg(args, "traceId", false) ?? null)
+      this.horizonDispatches.release(parentSessionId)
+      const status = plan.milestones.flatMap((item) => item.features).find((item) => item.id === featureId)!.status
+      return `[horizon] Audit ${verdict} recorded for '${featureId}'. Feature status: ${status}.`
+    } })
+
+    add({ name: "horizon_active_child", description: "Read the durable worker or auditor child lease currently held by a Horizon parent session.", inputSchema: hSchema(), execute: (args) => {
+      const id = resolveId(args); const lock = this.horizon.readActiveChild(id)
+      return lock ? `[horizon] Active ${lock.role}: ${lock.childRunId} for ${lock.featureId}; lease until ${lock.leaseUntil}.` : `[horizon] No active child for ${id}.`
+    } })
+
+    add({ name: "horizon_recover_active_child", description: "Conservatively recover one expired Horizon child lease after checking its expected identity and affirmative dead-child evidence.", inputSchema: hSchema({ expectedFeatureId: { type: "string" }, expectedChildRunId: { type: "string" }, childAlive: { type: "boolean", description: "Liveness evidence; recovery requires false. Omission fails closed." } }, ["expectedFeatureId", "expectedChildRunId"]), execute: (args) => {
+      const id = resolveId(args)
+      const recovered = this.horizon.recoverActiveChild(id, stringArg(args, "expectedFeatureId")!, stringArg(args, "expectedChildRunId")!, typeof args.childAlive === "boolean" ? args.childAlive : undefined)
+      return recovered ? `[horizon] Recovered the expected abandoned child for ${id}.` : `[horizon] No active child exists for ${id}.`
+    } })
+
+    add({ name: "horizon_update_feature", description: "Deprecated compatibility surface; execution status changes must use the evidence-backed worker and auditor transitions.", inputSchema: hSchema({ featureId: { type: "string" }, status: { type: "string", enum: ITEM_STATUSES }, subAgentSessionId: { type: "string" } }, ["featureId", "status"]), execute: (args) => {
       const id = resolveId(args); const featureId = stringArg(args, "featureId")!; const status = stringArg(args, "status") as HorizonItemStatus
       if (!ITEM_STATUSES.includes(status)) throw new Error(`Invalid status '${status}'`)
       const updates: Partial<HorizonFeature> = { status }
@@ -504,16 +564,17 @@ export class ParallaxMcpServer {
 
     add({ name: "horizon_session_status", description: "Get a complete Horizon status snapshot including artifacts.", inputSchema: hSchema(), execute: (args) => {
       const id = resolveId(args); const status = this.horizon.status(id); const plan = status.plan!; const state = status.state!
-      return `[horizon] Session status: ${id}\nPlan: ${plan.status}\nPhase: ${state.currentPhase}\nProgress: ${plan.stats.completedFeatures}/${plan.stats.totalFeatures}\nDecisions: ${status.decisions.length}\nResearch: ${status.research.findings?.length ?? 0} chars\nSkills: ${status.skills.length}\nTraces: ${status.traces.length}\nRetries: ${plan.stats.totalRetries}${state.pausedAt ? `\nPAUSED: ${state.pauseReason ?? "unknown"}` : ""}`
+      return `[horizon] Session status: ${id}\nPlan: ${plan.status}\nPhase: ${state.currentPhase}\nProgress: ${plan.stats.completedFeatures}/${plan.stats.totalFeatures}\nActive child: ${status.activeChild ? `${status.activeChild.role}:${status.activeChild.childRunId}` : "none"}\nDecisions: ${status.decisions.length}\nResearch: ${status.research.findings?.length ?? 0} chars\nSkills: ${status.skills.length}\nTraces: ${status.traces.length}\nRetries: ${plan.stats.totalRetries}${state.pausedAt ? `\nPAUSED: ${state.pauseReason ?? "unknown"}` : ""}`
     } })
 
-    add({ name: "horizon_evaluate_subagent", description: "Score a sub-agent after the plugin independently runs the project's detected verification checks.", inputSchema: hSchema({ featureId: { type: "string" }, protocolIntegrity: { type: "number", minimum: 0, maximum: 100 }, correctness: { type: "number", minimum: 0, maximum: 100 }, designQuality: { type: "number", minimum: 0, maximum: 100 }, edgeCaseCoverage: { type: "number", minimum: 0, maximum: 100 }, userPerspective: { type: "number", minimum: 0, maximum: 100 } }, ["featureId", "protocolIntegrity", "correctness", "designQuality", "edgeCaseCoverage", "userPerspective"]), execute: async (args) => {
+    add({ name: "horizon_evaluate_subagent", description: "Run legacy advisory scoring and project checks without granting receipt readiness or feature completion.", inputSchema: hSchema({ featureId: { type: "string" }, protocolIntegrity: { type: "number", minimum: 0, maximum: 100 }, correctness: { type: "number", minimum: 0, maximum: 100 }, designQuality: { type: "number", minimum: 0, maximum: 100 }, edgeCaseCoverage: { type: "number", minimum: 0, maximum: 100 }, userPerspective: { type: "number", minimum: 0, maximum: 100 } }, ["featureId", "protocolIntegrity", "correctness", "designQuality", "edgeCaseCoverage", "userPerspective"]), execute: async (args) => {
       const id = resolveId(args); const featureId = stringArg(args, "featureId")!
       const planBeforeVerification = this.horizon.readPlan(id)!
       const featureBeforeVerification = planBeforeVerification.milestones.flatMap((milestone) => milestone.features).find((feature) => feature.id === featureId)
       if (!featureBeforeVerification) throw new Error(`Feature '${featureId}' was not found`)
       const expectedFeatureDigest = featureVerificationDigest(planBeforeVerification.goal, featureBeforeVerification)
-      const verification = await runVerification(detectProject(this.projectRoot), [], { thorough: true })
+      const verification = await runVerification(detectProject(this.projectRoot), [], { thorough: true, sessionId: id, source: "automatic" })
+      new VerificationLedger(this.projectRoot).append(verification)
       const verificationDimension = verification.verdict === "pass" ? 100 : 0
       const verificationEvidence = truncate(`Command: ${verification.command ?? "none"}; verdict: ${verification.verdict}; exit: ${verification.exitCode ?? "none"}\n${verification.stderr || verification.stdout}`, 4_000)
       const dimensions = [["Protocol Integrity", numberArg(args, "protocolIntegrity"), .15], ["Verification", verificationDimension, .25], ["Correctness", numberArg(args, "correctness"), .25], ["Design Quality", numberArg(args, "designQuality"), .15], ["Edge Case Coverage", numberArg(args, "edgeCaseCoverage"), .10], ["User Perspective", numberArg(args, "userPerspective"), .10]] as const

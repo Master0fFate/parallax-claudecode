@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
@@ -14,8 +14,9 @@ afterEach(() => { while (roots.length) rmSync(roots.pop()!, { recursive: true, f
 
 const expectedTools = [
   "parallax_verify", "parallax_analyze", "parallax_checkin", "parallax_plan", "parallax_build", "parallax_debug", "parallax_horizon",
-  "parallax_hyperplan", "parallax_trace_export", "parallax_trace_pr_comment", "parallax_trace_view", "parallax_health",
-  "horizon_init_session", "horizon_write_plan", "horizon_read_plan", "horizon_update_feature", "horizon_update_milestone",
+  "parallax_hyperplan", "parallax_trace_export", "parallax_trace_pr_comment", "parallax_trace_view", "parallax_doctor", "parallax_health",
+  "horizon_init_session", "horizon_write_plan", "horizon_read_plan", "horizon_begin_worker", "horizon_observe_receipt",
+  "horizon_begin_auditor", "horizon_record_audit", "horizon_active_child", "horizon_recover_active_child", "horizon_update_feature", "horizon_update_milestone",
   "horizon_write_state", "horizon_read_state", "horizon_append_decision", "horizon_read_decisions", "horizon_write_research",
   "horizon_read_research", "horizon_create_skill", "horizon_list_skills", "horizon_save_trace", "horizon_list_sessions",
   "horizon_session_status", "horizon_evaluate_subagent", "horizon_config",
@@ -47,6 +48,38 @@ describe("bundled MCP server", () => {
     const explicit = await server.callTool("parallax_build", { sessionId: "claude-two" })
     expect(explicit.isError).not.toBe(true)
     expect(server.sessions.read("claude-two")!.mode).toBe("build")
+  })
+
+  it("records direct MCP verification as manual project evidence", async () => {
+    const root = temporary()
+    const server = new ParallaxMcpServer({ projectRoot: root, horizonRoot: temporary() })
+    server.sessions.initialize("manual-verify", root)
+
+    const result = await server.callTool("parallax_verify", { sessionId: "manual-verify" })
+
+    expect(result.isError).not.toBe(true)
+    const state = server.sessions.read("manual-verify")!
+    expect(state.trace.verifications).toHaveLength(1)
+    expect(state.trace.verifications[0]!.source).toBe("manual")
+    const ledger = readFileSync(join(root, ".parallax", "verification-ledger.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line))
+    expect(ledger).toHaveLength(1)
+    expect(ledger[0]).toMatchObject({ id: state.trace.verifications[0]!.id, source: "manual" })
+  })
+
+  it("does not mutate direct MCP evidence when ledger append fails", async () => {
+    const root = temporary()
+    const server = new ParallaxMcpServer({ projectRoot: root, horizonRoot: temporary() })
+    server.sessions.initialize("manual-ledger-failure", root)
+    mkdirSync(join(root, ".parallax"), { recursive: true })
+    writeFileSync(join(root, ".parallax", "verification-ledger.jsonl"), '{"schemaVersion":2')
+
+    const result = await server.callTool("parallax_verify", { sessionId: "manual-ledger-failure" })
+
+    expect(result.isError).toBe(true)
+    expect(result.content[0]?.text).toMatch(/torn final line/i)
+    const state = server.sessions.read("manual-ledger-failure")!
+    expect(state.trace.verifications).toEqual([])
+    expect(state.friction.trials).toBe(0)
   })
 
   it("uses safe single-Horizon-session fallback and rejects Horizon ambiguity", async () => {

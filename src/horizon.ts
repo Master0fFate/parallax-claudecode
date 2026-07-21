@@ -5,9 +5,12 @@ import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSyn
 import { basename, dirname, join, resolve } from "node:path"
 import { withDirectoryLock } from "./lock.js"
 import { atomicWriteJson, atomicWriteText } from "./state.js"
+import { VerificationLedger } from "./ledger.js"
 import {
   PARALLAX_SCHEMA_VERSION,
   type HorizonAutonomyLevel,
+  type HorizonActiveChildLock,
+  type HorizonAuditVerdict,
   type HorizonConfig,
   type HorizonDecision,
   type HorizonFeature,
@@ -16,6 +19,7 @@ import {
   type HorizonMilestone,
   type HorizonPlan,
   type HorizonState,
+  type VerificationRecord,
 } from "./types.js"
 
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
@@ -25,6 +29,29 @@ const PLAN_STATUSES = new Set(["planning", "executing", "completed", "failed"])
 const AUTONOMY = new Set(["full", "semi", "supervised"])
 const PHASES = new Set(["research", "plan", "execute", "audit", "complete"])
 const CONFIDENCE = new Set(["high", "medium", "low"])
+const RECEIPT_VERDICTS = new Set(["pass", "fail", "skipped", "unknown"])
+const AUDIT_VERDICTS = new Set(["accept", "corrective-worker"])
+const SUMMARY_LIMIT = 2_000
+const CHILD_LEASE_MS = 30 * 60 * 1_000
+// Receipt production and observation may cross process clocks. One second permits
+// scheduler/clock granularity without accepting materially future evidence.
+const RECEIPT_CLOCK_SKEW_MS = 1_000
+
+export type HorizonTransitionOperation = "begin-worker" | "observe-receipt" | "begin-auditor" | "record-audit" | "recover-active-child" | "abort-active-child"
+export type HorizonFaultStage = "journal-written" | "active-child-written" | "plan-written" | "state-written" | "index-written" | "active-child-released" | "journal-cleared"
+export interface HorizonStoreOptions {
+  faultInjector?: (stage: HorizonFaultStage, operation: HorizonTransitionOperation) => void
+  now?: () => number
+}
+
+interface HorizonTransitionJournal {
+  schemaVersion: 1
+  root: string
+  sessionId: string
+  operation: HorizonTransitionOperation
+  createdAt: string
+  target: { plan: HorizonPlan; state: HorizonState; activeChild: HorizonActiveChildLock | null; index: HorizonIndex }
+}
 
 export const DEFAULT_HORIZON_CONFIG: HorizonConfig = {
   autonomyLevel: "full",
@@ -54,6 +81,78 @@ function nullableString(value: unknown, label: string): string | null {
   if (value !== null && typeof value !== "string") throw new Error(`${label} must be a string or null`)
   return value
 }
+function timestampString(value: unknown, label: string): string {
+  const result = string(value, label)
+  if (!Number.isFinite(Date.parse(result))) throw new Error(`${label} must be a parseable timestamp`)
+  return result
+}
+function nullableTimestamp(value: unknown, label: string): string | null {
+  return value === null ? null : timestampString(value, label)
+}
+function exactKeys(value: Record<string, unknown>, allowed: readonly string[], label: string): void {
+  const unknown = Object.keys(value).filter((key) => !allowed.includes(key))
+  if (unknown.length) throw new Error(`${label} contains unknown fields: ${unknown.join(", ")}`)
+}
+function boundedSummary(value: unknown, label: string): string | null {
+  const result = nullableString(value, label)
+  if (result !== null && result.length > SUMMARY_LIMIT) throw new Error(`${label} exceeds ${SUMMARY_LIMIT} characters`)
+  return result
+}
+function nullableSafeId(value: unknown, label: string): string | null {
+  const result = nullableString(value, label)
+  return result === null ? null : assertSafeId(label, result)
+}
+function emptyEvidence(): HorizonFeature["evidence"] {
+  return {
+    worker: { childRunId: null, startedAt: null, completedAt: null, receipt: null, summary: null, traceId: null },
+    auditor: { childRunId: null, startedAt: null, completedAt: null, verdict: null, summary: null, traceId: null },
+    history: [],
+  }
+}
+
+function validateEvidence(value: unknown, label: string): HorizonFeature["evidence"] {
+  if (!object(value) || !object(value.worker) || !object(value.auditor)) throw new Error(`${label}.evidence is invalid`)
+  exactKeys(value, ["worker", "auditor", "history"], `${label}.evidence`)
+  exactKeys(value.worker, ["childRunId", "startedAt", "completedAt", "receipt", "summary", "traceId"], `${label}.evidence.worker`)
+  exactKeys(value.auditor, ["childRunId", "startedAt", "completedAt", "verdict", "summary", "traceId"], `${label}.evidence.auditor`)
+  let receipt: HorizonFeature["evidence"]["worker"]["receipt"] = null
+  if (value.worker.receipt !== null) {
+    if (!object(value.worker.receipt)) throw new Error(`${label}.evidence.worker.receipt is invalid`)
+    exactKeys(value.worker.receipt, ["id", "verdict", "sessionId", "source", "cwd", "startedAt", "observedAt"], `${label}.evidence.worker.receipt`)
+    const verdict = string(value.worker.receipt.verdict, `${label}.receipt.verdict`) as VerificationRecord["verdict"]
+    if (!RECEIPT_VERDICTS.has(verdict)) throw new Error(`${label}.receipt.verdict is invalid`)
+    const source = string(value.worker.receipt.source, `${label}.receipt.source`) as VerificationRecord["source"]
+    if (source !== "manual" && source !== "automatic") throw new Error(`${label}.receipt.source is invalid`)
+    receipt = {
+      id: assertSafeId("receipt ID", string(value.worker.receipt.id, `${label}.receipt.id`)), verdict,
+      sessionId: assertSafeId("receipt session ID", string(value.worker.receipt.sessionId, `${label}.receipt.sessionId`)), source,
+      cwd: string(value.worker.receipt.cwd, `${label}.receipt.cwd`), startedAt: timestampString(value.worker.receipt.startedAt, `${label}.receipt.startedAt`),
+      observedAt: timestampString(value.worker.receipt.observedAt, `${label}.receipt.observedAt`),
+    }
+  }
+  const auditVerdict = value.auditor.verdict === null ? null : string(value.auditor.verdict, `${label}.auditor.verdict`) as HorizonAuditVerdict
+  if (auditVerdict !== null && !AUDIT_VERDICTS.has(auditVerdict)) throw new Error(`${label}.auditor.verdict is invalid`)
+  return {
+    worker: {
+      childRunId: nullableSafeId(value.worker.childRunId, `${label}.worker.childRunId`), startedAt: nullableTimestamp(value.worker.startedAt, `${label}.worker.startedAt`),
+      completedAt: nullableTimestamp(value.worker.completedAt, `${label}.worker.completedAt`), receipt,
+      summary: boundedSummary(value.worker.summary, `${label}.worker.summary`), traceId: nullableSafeId(value.worker.traceId, `${label}.worker.traceId`),
+    },
+    auditor: {
+      childRunId: nullableSafeId(value.auditor.childRunId, `${label}.auditor.childRunId`), startedAt: nullableTimestamp(value.auditor.startedAt, `${label}.auditor.startedAt`),
+      completedAt: nullableTimestamp(value.auditor.completedAt, `${label}.auditor.completedAt`), verdict: auditVerdict,
+      summary: boundedSummary(value.auditor.summary, `${label}.auditor.summary`), traceId: nullableSafeId(value.auditor.traceId, `${label}.auditor.traceId`),
+    },
+    history: (value.history === undefined ? [] : Array.isArray(value.history) ? value.history : (() => { throw new Error(`${label}.evidence.history must be an array`) })())
+      .map((attempt, index) => {
+        if (!object(attempt)) throw new Error(`${label}.evidence.history[${index}] is invalid`)
+        exactKeys(attempt, ["worker", "auditor"], `${label}.evidence.history[${index}]`)
+        const parsed = validateEvidence({ worker: attempt.worker, auditor: attempt.auditor, history: [] }, `${label}.history[${index}]`)
+        if (!parsed.worker.receipt || !parsed.worker.completedAt || !parsed.auditor.verdict || !parsed.auditor.completedAt) throw new Error(`${label}.evidence.history[${index}] must be a completed attempt`)
+        return { worker: parsed.worker, auditor: parsed.auditor }
+      }),
+  }
+}
 
 export function assertSafeId(kind: string, value: string): string {
   if (!SAFE_ID.test(value) || value === "." || value === ".." || basename(value) !== value) throw new Error(`Invalid ${kind}: ${value}`)
@@ -62,6 +161,7 @@ export function assertSafeId(kind: string, value: string): string {
 
 function validateVerification(value: unknown, label: string): HorizonFeature["verification"] {
   if (!object(value) || typeof value.passed !== "boolean") throw new Error(`${label} verification is invalid`)
+  exactKeys(value, ["passed", "testResults", "issues", "score", "featureDigest"], `${label}.verification`)
   const score = value.score
   if (score !== null && (typeof score !== "number" || !Number.isFinite(score) || score < 0 || score > 100)) throw new Error(`${label} verification score is invalid`)
   const featureDigest = value.featureDigest === undefined ? null : nullableString(value.featureDigest, `${label}.featureDigest`)
@@ -77,6 +177,7 @@ function validateVerification(value: unknown, label: string): HorizonFeature["ve
 
 function validateFeature(value: unknown, label: string): HorizonFeature {
   if (!object(value)) throw new Error(`${label} must be an object`)
+  exactKeys(value, ["id", "name", "description", "acceptanceCriteria", "protocolLevel", "status", "order", "subAgentSessionId", "attempts", "maxAttempts", "verification", "evidence", "skillsRequired", "skillsGenerated"], label)
   const id = assertSafeId("feature ID", string(value.id, `${label}.id`))
   const status = string(value.status, `${label}.status`) as HorizonItemStatus
   if (!ITEM_STATUSES.has(status)) throw new Error(`${label}.status is invalid`)
@@ -85,7 +186,7 @@ function validateFeature(value: unknown, label: string): HorizonFeature {
   const attempts = integer(value.attempts, `${label}.attempts`)
   const maxAttempts = integer(value.maxAttempts, `${label}.maxAttempts`, 1)
   if (attempts > maxAttempts) throw new Error(`${label}.attempts exceeds maxAttempts`)
-  return {
+  const feature: HorizonFeature = {
     id,
     name: string(value.name, `${label}.name`),
     description: string(value.description, `${label}.description`, true),
@@ -97,14 +198,29 @@ function validateFeature(value: unknown, label: string): HorizonFeature {
     attempts,
     maxAttempts,
     verification: validateVerification(value.verification, label),
+    evidence: value.evidence === undefined ? emptyEvidence() : validateEvidence(value.evidence, label),
     skillsRequired: strings(value.skillsRequired, `${label}.skillsRequired`),
     skillsGenerated: strings(value.skillsGenerated, `${label}.skillsGenerated`),
   }
+  const worker = feature.evidence.worker
+  const auditor = feature.evidence.auditor
+  if ((worker.childRunId === null) !== (worker.startedAt === null)) throw new Error(`${label} worker identity and start time must be set together`)
+  if (worker.receipt && (!worker.childRunId || worker.receipt.sessionId !== worker.childRunId || !worker.completedAt || worker.summary === null)) throw new Error(`${label} worker receipt is not bound to completed worker evidence`)
+  if (!worker.receipt && (worker.completedAt !== null || worker.summary !== null || worker.traceId !== null)) throw new Error(`${label} incomplete worker cannot retain completion evidence`)
+  if ((auditor.childRunId === null) !== (auditor.startedAt === null)) throw new Error(`${label} auditor identity and start time must be set together`)
+  if (auditor.childRunId && !worker.receipt) throw new Error(`${label} auditor requires an observed worker receipt`)
+  if (auditor.verdict !== null && (!auditor.childRunId || !auditor.completedAt || auditor.summary === null)) throw new Error(`${label} audit verdict requires completed auditor evidence`)
+  if (auditor.verdict === null && (auditor.completedAt !== null || auditor.summary !== null || auditor.traceId !== null)) throw new Error(`${label} incomplete auditor cannot retain completion evidence`)
+  if (worker.childRunId && auditor.childRunId === worker.childRunId) throw new Error(`${label} worker cannot audit its own work`)
+  if (auditor.verdict === "accept" && worker.receipt?.verdict !== "pass") throw new Error(`${label} non-pass receipt cannot be accepted`)
+  if (feature.status === "completed" && (worker.receipt?.verdict !== "pass" || auditor.verdict !== "accept")) throw new Error(`Completed feature ${feature.id} requires pass receipt and independent acceptance`)
+  return feature
 }
 
 function validateMilestone(value: unknown, index: number): HorizonMilestone {
   const label = `milestones[${index}]`
   if (!object(value) || !Array.isArray(value.features)) throw new Error(`${label} is invalid`)
+  exactKeys(value, ["id", "name", "description", "status", "order", "requiresApproval", "features"], label)
   const status = string(value.status, `${label}.status`) as HorizonItemStatus
   if (!ITEM_STATUSES.has(status)) throw new Error(`${label}.status is invalid`)
   if (typeof value.requiresApproval !== "boolean") throw new Error(`${label}.requiresApproval must be boolean`)
@@ -136,6 +252,7 @@ export function featureVerificationDigest(goal: string, feature: HorizonFeature)
 
 export function validateHorizonPlan(value: unknown, expectedSessionId?: string): HorizonPlan {
   if (!object(value) || value.schemaVersion !== PARALLAX_SCHEMA_VERSION || !Array.isArray(value.milestones)) throw new Error("Invalid Horizon plan schema")
+  exactKeys(value, ["schemaVersion", "sessionId", "goal", "autonomyLevel", "status", "createdAt", "completedAt", "milestones", "skills", "stats"], "plan")
   const sessionId = assertSafeId("session ID", string(value.sessionId, "plan.sessionId"))
   if (expectedSessionId !== undefined && sessionId !== expectedSessionId) throw new Error("Plan belongs to a different Horizon session")
   const autonomyLevel = string(value.autonomyLevel, "plan.autonomyLevel") as HorizonAutonomyLevel
@@ -148,6 +265,8 @@ export function validateHorizonPlan(value: unknown, expectedSessionId?: string):
   if (new Set(milestoneIds).size !== milestoneIds.length) throw new Error("Milestone IDs must be unique")
   if (new Set(featureIds).size !== featureIds.length) throw new Error("Feature IDs must be unique across the plan")
   if (!object(value.skills) || !object(value.stats)) throw new Error("Invalid plan skills or stats")
+  exactKeys(value.skills, ["global", "sessionScoped"], "plan.skills")
+  exactKeys(value.stats, ["totalFeatures", "completedFeatures", "failedFeatures", "totalRetries", "estimatedCost"], "plan.stats")
   const completedAt = nullableString(value.completedAt, "plan.completedAt")
   const estimatedCost = value.stats.estimatedCost
   if (estimatedCost !== null && (typeof estimatedCost !== "number" || !Number.isFinite(estimatedCost) || estimatedCost < 0)) throw new Error("Invalid estimatedCost")
@@ -171,16 +290,7 @@ export function validateHorizonPlan(value: unknown, expectedSessionId?: string):
   }
   for (const milestone of plan.milestones) {
     for (const feature of milestone.features) {
-      // Same-schema compatibility: bind previously passing 1.0 records to the definition
-      // they contained when first read. Subsequent writes enforce provenance and immutability.
-      if (feature.verification.passed && feature.verification.featureDigest === null) feature.verification.featureDigest = featureVerificationDigest(plan.goal, feature)
-      if (feature.verification.passed && feature.verification.issues.length > 0) throw new Error(`Passing feature ${feature.id} cannot retain verification issues`)
-      if (feature.verification.passed && (feature.verification.score === null || feature.verification.score < 75 || !feature.verification.testResults?.trim())) {
-        throw new Error(`Passing feature ${feature.id} requires a score of at least 75 and independent verification evidence`)
-      }
-      if (feature.verification.passed && feature.verification.featureDigest !== featureVerificationDigest(plan.goal, feature)) throw new Error(`Feature ${feature.id} verification does not match its current definition`)
-      if (!feature.verification.passed && feature.verification.featureDigest !== null) throw new Error(`Unverified feature ${feature.id} cannot retain a verification digest`)
-      if (feature.status === "completed" && !feature.verification.passed) throw new Error(`Completed feature ${feature.id} requires passing verification evidence`)
+      if (feature.verification.featureDigest !== null && feature.verification.featureDigest !== featureVerificationDigest(plan.goal, feature)) throw new Error(`Feature ${feature.id} advisory evaluation does not match its current definition`)
     }
     if (milestone.status === "completed" && (milestone.features.length === 0 || milestone.features.some((feature) => feature.status !== "completed"))) {
       throw new Error(`Completed milestone ${milestone.id} must contain only completed features`)
@@ -196,11 +306,14 @@ export function validateHorizonPlan(value: unknown, expectedSessionId?: string):
   if (plan.stats.totalFeatures !== expected.totalFeatures || plan.stats.completedFeatures !== expected.completedFeatures || plan.stats.failedFeatures !== expected.failedFeatures || plan.stats.totalRetries !== expected.totalRetries) {
     throw new Error("Plan stats do not match feature data")
   }
+  const active = milestones.flatMap((milestone) => milestone.features).filter((feature) => feature.status === "in_progress")
+  if (active.length > 1) throw new Error("Only one Horizon feature may be active")
   return plan
 }
 
 export function validateHorizonState(value: unknown, expectedSessionId?: string): HorizonState {
   if (!object(value) || value.schemaVersion !== PARALLAX_SCHEMA_VERSION) throw new Error("Invalid Horizon state schema")
+  exactKeys(value, ["schemaVersion", "sessionId", "currentPhase", "activeSubAgents", "currentMilestoneId", "currentFeatureId", "lastCheckpoint", "pausedAt", "pauseReason"], "state")
   const sessionId = assertSafeId("session ID", string(value.sessionId, "state.sessionId"))
   if (expectedSessionId !== undefined && sessionId !== expectedSessionId) throw new Error("State belongs to a different Horizon session")
   const currentPhase = string(value.currentPhase, "state.currentPhase") as HorizonState["currentPhase"]
@@ -218,7 +331,7 @@ export function validateHorizonState(value: unknown, expectedSessionId?: string)
   }
 }
 
-function validateStateAgainstPlan(state: HorizonState, plan: HorizonPlan): void {
+export function validateHorizonStateAgainstPlan(state: HorizonState, plan: HorizonPlan): void {
   const milestone = state.currentMilestoneId === null ? null : plan.milestones.find((item) => item.id === state.currentMilestoneId)
   if (state.currentMilestoneId !== null && !milestone) throw new Error(`State references unknown milestone ${state.currentMilestoneId}`)
   const featureMilestone = state.currentFeatureId === null ? null : plan.milestones.find((item) => item.features.some((feature) => feature.id === state.currentFeatureId))
@@ -229,6 +342,7 @@ function validateStateAgainstPlan(state: HorizonState, plan: HorizonPlan): void 
 
 export function validateHorizonDecision(value: unknown): HorizonDecision {
   if (!object(value)) throw new Error("Decision must be an object")
+  exactKeys(value, ["timestamp", "feature", "ambiguity", "researchResult", "decision", "rationale", "confidence"], "decision")
   const confidence = string(value.confidence, "decision.confidence") as HorizonDecision["confidence"]
   if (!CONFIDENCE.has(confidence)) throw new Error("Invalid decision confidence")
   return {
@@ -242,8 +356,9 @@ export function validateHorizonDecision(value: unknown): HorizonDecision {
   }
 }
 
-function validateConfig(value: unknown): HorizonConfig {
+export function validateHorizonConfig(value: unknown): HorizonConfig {
   if (!object(value)) throw new Error("Horizon config must be an object")
+  exactKeys(value, ["autonomyLevel", "autoApproveMilestones", "maxRetryCycles", "decisionConfidenceThreshold", "pauseOnCriticalFailure", "testCommand", "lintCommand"], "config")
   const autonomyLevel = string(value.autonomyLevel, "config.autonomyLevel") as HorizonAutonomyLevel
   if (!AUTONOMY.has(autonomyLevel)) throw new Error("Invalid config autonomyLevel")
   const threshold = value.decisionConfidenceThreshold
@@ -266,6 +381,7 @@ export function validateHorizonIndex(value: unknown): HorizonIndex {
   for (const [id, metadata] of Object.entries(value.sessions)) {
     assertSafeId("session ID", id)
     if (!object(metadata)) throw new Error(`Invalid index entry: ${id}`)
+    exactKeys(metadata, ["goal", "createdAt", "updatedAt", "status", "autonomyLevel"], `index.${id}`)
     const status = string(metadata.status, `index.${id}.status`) as HorizonPlan["status"]
     const autonomyLevel = string(metadata.autonomyLevel, `index.${id}.autonomyLevel`) as HorizonAutonomyLevel
     if (!PLAN_STATUSES.has(status) || !AUTONOMY.has(autonomyLevel)) throw new Error(`Invalid index entry: ${id}`)
@@ -296,13 +412,33 @@ function readJson(path: string): unknown | null {
   }
 }
 
+export function validateHorizonActiveChild(value: unknown, root: string, sessionId: string): HorizonActiveChildLock {
+  if (!object(value)) throw new Error("Invalid Horizon active-child lock")
+  exactKeys(value, ["schemaVersion", "root", "sessionId", "featureId", "role", "childRunId", "acquiredAt", "leaseUntil"], "active-child lock")
+  if (value.schemaVersion !== 1 || value.root !== root || value.sessionId !== sessionId || (value.role !== "worker" && value.role !== "auditor")) throw new Error("Invalid Horizon active-child lock identity")
+  const acquiredAt = timestampString(value.acquiredAt, "lock.acquiredAt")
+  const leaseUntil = timestampString(value.leaseUntil, "lock.leaseUntil")
+  return {
+    schemaVersion: 1, root, sessionId: assertSafeId("session ID", sessionId),
+    featureId: assertSafeId("feature ID", string(value.featureId, "lock.featureId")), role: value.role,
+    childRunId: assertSafeId("child run ID", string(value.childRunId, "lock.childRunId")), acquiredAt, leaseUntil,
+  }
+}
+
 export class HorizonStore {
   readonly root: string
   private lockDepth = 0
-  constructor(root = process.env.PARALLAX_HORIZON_HOME || join(homedir(), ".parallax", "horizon")) {
+  private readonly faultInjector: HorizonStoreOptions["faultInjector"]
+  private readonly clock: () => number
+  constructor(root = process.env.PARALLAX_HORIZON_HOME || join(homedir(), ".parallax", "horizon"), options: HorizonStoreOptions = {}) {
     this.root = resolve(root)
-    this.withLock(() => this.migrateLegacyStore())
+    this.faultInjector = options.faultInjector
+    this.clock = options.now ?? Date.now
+    this.withLock(() => { this.recoverAllTransactions(); this.migrateLegacyStore(); this.migrateEvidenceStore() })
   }
+
+  private currentTime(): number { return this.clock() }
+  private currentTimestamp(): string { return new Date(this.currentTime()).toISOString() }
 
   private withLock<T>(operation: () => T): T {
     if (this.lockDepth > 0) return operation()
@@ -346,7 +482,7 @@ export class HorizonStore {
         if (!object(rawState)) throw new Error(`Cannot migrate missing or invalid state artifact: ${id}`)
         plans.set(id, validateHorizonPlan(rawPlan.schemaVersion === undefined ? { schemaVersion: PARALLAX_SCHEMA_VERSION, ...rawPlan } : rawPlan, id))
         states.set(id, validateHorizonState(rawState.schemaVersion === undefined ? { schemaVersion: PARALLAX_SCHEMA_VERSION, ...rawState } : rawState, id))
-        validateStateAgainstPlan(states.get(id)!, plans.get(id)!)
+        validateHorizonStateAgainstPlan(states.get(id)!, plans.get(id)!)
         const plan = plans.get(id)!
         if (rawMeta.goal !== plan.goal || rawMeta.createdAt !== plan.createdAt || legacyStatus !== plan.status || legacyAutonomy !== plan.autonomyLevel) {
           throw new Error(`Legacy index metadata does not match plan artifact: ${id}`)
@@ -396,6 +532,42 @@ export class HorizonStore {
     }
   }
 
+  /** Explicitly migrate score-era features to empty, non-ready evidence state. */
+  private migrateEvidenceStore(): void {
+    const rawIndex = readJson(join(this.root, "index.json"))
+    if (!object(rawIndex) || !object(rawIndex.sessions)) return
+    for (const id of Object.keys(rawIndex.sessions)) {
+      assertSafeId("session ID", id)
+      const path = this.path(id, "plan.json")
+      const raw = readJson(path)
+      if (!object(raw) || !Array.isArray(raw.milestones)) continue
+      let changed = false
+      for (const milestone of raw.milestones) {
+        if (!object(milestone) || !Array.isArray(milestone.features)) continue
+        for (const feature of milestone.features) {
+          if (!object(feature) || feature.evidence !== undefined) continue
+          feature.evidence = emptyEvidence()
+          feature.status = "pending"
+          feature.subAgentSessionId = null
+          if (object(feature.verification)) { feature.verification.passed = false; feature.verification.featureDigest = null }
+          changed = true
+        }
+        if (changed && milestone.status === "completed") milestone.status = "pending"
+      }
+      if (!changed) continue
+      raw.status = raw.milestones.some((milestone) => object(milestone) && milestone.status === "failed") ? "failed" : "planning"
+      raw.completedAt = null
+      const migrated = validateHorizonPlan({ ...raw, stats: { ...(object(raw.stats) ? raw.stats : {}), ...computePlanStats(raw as unknown as HorizonPlan) } }, id)
+      const state = this.readState(id)
+      if (state?.currentPhase === "complete") {
+        state.currentPhase = "plan"; state.currentMilestoneId = null; state.currentFeatureId = null; state.activeSubAgents = []
+        atomicWriteJson(this.path(id, "state.json"), validateHorizonState(state, id))
+      }
+      atomicWriteJson(path, migrated)
+      this.updateIndex(id, migrated)
+    }
+  }
+
   private sessionDir(sessionId: string): string {
     const sessions = resolve(this.root, "sessions")
     const path = resolve(sessions, assertSafeId("session ID", sessionId))
@@ -404,11 +576,69 @@ export class HorizonStore {
   }
   private path(sessionId: string, name: string): string { return join(this.sessionDir(sessionId), name) }
 
+  private transitionPath(sessionId: string): string { return this.path(sessionId, "transition.json") }
+  private recoverAllTransactions(): void {
+    const sessions = join(this.root, "sessions")
+    if (!existsSync(sessions)) return
+    for (const entry of readdirSync(sessions, { withFileTypes: true })) if (entry.isDirectory() && SAFE_ID.test(entry.name)) this.recoverPendingTransaction(entry.name)
+  }
+  private validateJournal(value: unknown, sessionId: string): HorizonTransitionJournal {
+    if (!object(value) || !object(value.target)) throw new Error(`Invalid Horizon transition journal for ${sessionId}`)
+    exactKeys(value, ["schemaVersion", "root", "sessionId", "operation", "createdAt", "target"], "transition journal")
+    exactKeys(value.target, ["plan", "state", "activeChild", "index"], "transition journal target")
+    const operations = new Set<HorizonTransitionOperation>(["begin-worker", "observe-receipt", "begin-auditor", "record-audit", "recover-active-child", "abort-active-child"])
+    if (value.schemaVersion !== 1 || value.root !== this.root || value.sessionId !== sessionId || !operations.has(value.operation as HorizonTransitionOperation)) throw new Error(`Invalid Horizon transition journal identity for ${sessionId}`)
+    const plan = validateHorizonPlan(value.target.plan, sessionId)
+    const state = validateHorizonState(value.target.state, sessionId)
+    validateHorizonStateAgainstPlan(state, plan)
+    const activeChild = value.target.activeChild === null ? null : validateHorizonActiveChild(value.target.activeChild, this.root, sessionId)
+    const expected = activeChild ? [activeChild.childRunId] : []
+    if (JSON.stringify(state.activeSubAgents) !== JSON.stringify(expected) || (activeChild && state.currentFeatureId !== activeChild.featureId)) throw new Error(`Transition journal active child does not match state for ${sessionId}`)
+    return { schemaVersion: 1, root: this.root, sessionId, operation: value.operation as HorizonTransitionOperation, createdAt: timestampString(value.createdAt, "transition.createdAt"), target: { plan, state, activeChild, index: validateHorizonIndex(value.target.index) } }
+  }
+  private recoverPendingTransaction(sessionId: string): void {
+    const raw = readJson(this.transitionPath(sessionId))
+    if (raw === null) return
+    this.applyJournal(this.validateJournal(raw, sessionId), false)
+  }
+  private ensureRecovered(sessionId: string): void { this.withLock(() => this.recoverPendingTransaction(sessionId)) }
+  private targetIndex(sessionId: string, plan: HorizonPlan, updatedAt: string): HorizonIndex {
+    const index = this.readIndex()
+    const previous = index.sessions[sessionId]
+    index.sessions[sessionId] = { goal: plan.goal, createdAt: previous?.createdAt ?? plan.createdAt, updatedAt, status: plan.status, autonomyLevel: plan.autonomyLevel }
+    return validateHorizonIndex(index)
+  }
+  private applyJournal(journal: HorizonTransitionJournal, injectFaults: boolean): void {
+    const fault = (stage: HorizonFaultStage): void => { if (injectFaults) this.faultInjector?.(stage, journal.operation) }
+    const { sessionId, target } = journal
+    if (target.activeChild) { atomicWriteJson(this.activeChildPath(sessionId), target.activeChild); fault("active-child-written") }
+    atomicWriteJson(this.path(sessionId, "plan.json"), target.plan); fault("plan-written")
+    atomicWriteJson(this.path(sessionId, "state.json"), target.state); fault("state-written")
+    atomicWriteJson(join(this.root, "index.json"), target.index); fault("index-written")
+    if (!target.activeChild) { rmSync(this.activeChildPath(sessionId), { force: true }); fault("active-child-released") }
+    rmSync(this.transitionPath(sessionId), { force: true })
+    fault("journal-cleared")
+  }
+  private commitJournal(operation: HorizonTransitionOperation, sessionId: string, plan: HorizonPlan, state: HorizonState, activeChild: HorizonActiveChildLock | null): HorizonPlan {
+    plan.stats = computePlanStats(plan)
+    const validatedPlan = validateHorizonPlan(plan, sessionId)
+    const validatedState = validateHorizonState(state, sessionId)
+    validateHorizonStateAgainstPlan(validatedState, validatedPlan)
+    const expected = activeChild ? [activeChild.childRunId] : []
+    if (JSON.stringify(validatedState.activeSubAgents) !== JSON.stringify(expected) || (activeChild && validatedState.currentFeatureId !== activeChild.featureId)) throw new Error("Horizon transition state does not match its active child")
+    const createdAt = now()
+    const journal: HorizonTransitionJournal = { schemaVersion: 1, root: this.root, sessionId, operation, createdAt, target: { plan: validatedPlan, state: validatedState, activeChild, index: this.targetIndex(sessionId, validatedPlan, createdAt) } }
+    atomicWriteJson(this.transitionPath(sessionId), journal)
+    this.faultInjector?.("journal-written", operation)
+    this.applyJournal(journal, true)
+    return validatedPlan
+  }
+
   loadConfig(): HorizonConfig {
     const value = readJson(join(this.root, "config.json"))
-    return value === null ? { ...DEFAULT_HORIZON_CONFIG } : validateConfig(value)
+    return value === null ? { ...DEFAULT_HORIZON_CONFIG } : validateHorizonConfig(value)
   }
-  saveConfig(config: HorizonConfig): void { this.withLock(() => atomicWriteJson(join(this.root, "config.json"), validateConfig(config))) }
+  saveConfig(config: HorizonConfig): void { this.withLock(() => atomicWriteJson(join(this.root, "config.json"), validateHorizonConfig(config))) }
 
   initSession(sessionId: string, goal: string, autonomyLevel: HorizonAutonomyLevel = this.loadConfig().autonomyLevel): HorizonPlan {
     return this.withLock(() => {
@@ -435,28 +665,242 @@ export class HorizonStore {
   }
 
   readPlan(sessionId: string): HorizonPlan | null {
+    this.ensureRecovered(sessionId)
     const value = readJson(this.path(sessionId, "plan.json"))
     return value === null ? null : validateHorizonPlan(value, sessionId)
+  }
+  private activeChildPath(sessionId: string): string { return this.path(sessionId, "active-child.json") }
+  readActiveChild(sessionId: string): HorizonActiveChildLock | null {
+    this.ensureRecovered(sessionId)
+    const value = readJson(this.activeChildPath(sessionId))
+    if (value === null) return null
+    return validateHorizonActiveChild(value, this.root, sessionId)
+  }
+  recoverActiveChild(sessionId: string, expectedFeatureId: string, expectedChildRunId: string, childAlive?: boolean): boolean {
+    return this.withLock(() => {
+      assertSafeId("feature ID", expectedFeatureId); assertSafeId("child run ID", expectedChildRunId)
+      const lock = this.readActiveChild(sessionId)
+      if (!lock) {
+        const plan = this.readPlan(sessionId)
+        const state = this.readState(sessionId)
+        const hasPlanActiveChild = plan?.milestones.some((milestone) => milestone.features.some((feature) => feature.status === "in_progress"
+          && ((feature.evidence.worker.childRunId !== null && feature.evidence.worker.receipt === null)
+            || (feature.evidence.auditor.childRunId !== null && feature.evidence.auditor.verdict === null)))) === true
+        if ((state?.activeSubAgents.length ?? 0) > 0 || hasPlanActiveChild) throw new Error("Active child recovery corruption: active state or plan evidence exists without a lock")
+        return false
+      }
+      if (lock.featureId !== expectedFeatureId || lock.childRunId !== expectedChildRunId) throw new Error(`Active child identity mismatch: expected ${expectedFeatureId}/${expectedChildRunId}, found ${lock.featureId}/${lock.childRunId}`)
+      const plan = this.readPlan(sessionId)
+      const state = this.readState(sessionId)
+      if (!plan) throw new Error(`Active child recovery corruption: Horizon plan not found for ${sessionId}`)
+      if (!state) throw new Error(`Active child recovery corruption: Horizon state not found for ${sessionId}`)
+      if (state.currentFeatureId !== lock.featureId || state.activeSubAgents.length !== 1 || state.activeSubAgents[0] !== lock.childRunId) {
+        throw new Error(`Active child recovery corruption: state does not match ${lock.role} ${lock.featureId}/${lock.childRunId}`)
+      }
+      let milestone: HorizonMilestone
+      let feature: HorizonFeature
+      try { ({ milestone, feature } = this.locateFeature(plan, lock.featureId)) }
+      catch { throw new Error(`Active child recovery corruption: plan has no feature ${lock.featureId}`) }
+      const roleEvidence = lock.role === "worker" ? feature.evidence.worker : feature.evidence.auditor
+      const roleIncomplete = lock.role === "worker" ? feature.evidence.worker.receipt === null : feature.evidence.auditor.verdict === null
+      const workerIdentityMatches = lock.role !== "worker" || feature.subAgentSessionId === lock.childRunId
+      if (feature.status !== "in_progress" || roleEvidence.childRunId !== lock.childRunId || roleEvidence.startedAt !== lock.acquiredAt || !roleIncomplete || !workerIdentityMatches) {
+        throw new Error(`Active child recovery corruption: plan evidence does not match ${lock.role} ${lock.featureId}/${lock.childRunId}`)
+      }
+      if (Date.parse(lock.leaseUntil) > this.currentTime()) throw new Error("Active child lease has not expired")
+      if (childAlive === undefined) throw new Error("Cannot recover an abandoned child without affirmative liveness evidence that it is dead")
+      if (childAlive) throw new Error("Cannot recover active child because liveness evidence says it is still alive")
+      if (lock.role === "worker") {
+        feature.evidence.worker = emptyEvidence().worker; feature.evidence.auditor = emptyEvidence().auditor
+        feature.status = "pending"; feature.subAgentSessionId = null; milestone.status = "pending"
+      } else {
+        feature.evidence.auditor = emptyEvidence().auditor
+      }
+      state.activeSubAgents = []; state.pausedAt = this.currentTimestamp(); state.pauseReason = `Abandoned ${lock.role} ${lock.childRunId} requires recovery`
+      this.commitJournal("recover-active-child", sessionId, plan, state, null)
+      return true
+    })
+  }
+  abortActiveChild(sessionId: string, expectedFeatureId: string, expectedChildRunId: string, reason: string): boolean {
+    return this.withLock(() => {
+      const lock = this.readActiveChild(sessionId)
+      if (!lock) return false
+      if (lock.featureId !== expectedFeatureId || lock.childRunId !== expectedChildRunId) throw new Error(`Active child identity mismatch: expected ${expectedFeatureId}/${expectedChildRunId}, found ${lock.featureId}/${lock.childRunId}`)
+      const plan = this.readPlan(sessionId); const state = this.readState(sessionId)
+      if (!plan || !state) throw new Error("Active child abort requires matching plan and state")
+      const { milestone, feature } = this.locateFeature(plan, lock.featureId)
+      if (lock.role === "worker") {
+        feature.evidence.worker = emptyEvidence().worker; feature.evidence.auditor = emptyEvidence().auditor
+        feature.status = "pending"; feature.subAgentSessionId = null; milestone.status = "pending"
+      } else feature.evidence.auditor = emptyEvidence().auditor
+      state.activeSubAgents = []; state.pausedAt = this.currentTimestamp(); state.pauseReason = boundedSummary(reason, "abort reason")
+      this.commitJournal("abort-active-child", sessionId, plan, state, null)
+      return true
+    })
+  }
+  private makeActiveChild(sessionId: string, featureId: string, role: "worker" | "auditor", childRunId: string): HorizonActiveChildLock {
+    if (this.readActiveChild(sessionId)) throw new Error("Another Horizon child is already active for this session")
+    assertSafeId("child run ID", childRunId)
+    const acquiredAt = this.currentTimestamp()
+    return { schemaVersion: 1, root: this.root, sessionId, featureId, role, childRunId, acquiredAt, leaseUntil: new Date(Date.parse(acquiredAt) + CHILD_LEASE_MS).toISOString() }
+  }
+  private locateFeature(plan: HorizonPlan, featureId: string): { milestone: HorizonMilestone; feature: HorizonFeature } {
+    const milestone = plan.milestones.find((item) => item.features.some((feature) => feature.id === featureId))
+    const feature = milestone?.features.find((item) => item.id === featureId)
+    if (!milestone || !feature) throw new Error(`Feature '${featureId}' was not found`)
+    return { milestone, feature }
+  }
+  private childIdUsed(plan: HorizonPlan, childRunId: string): boolean {
+    return plan.milestones.some((milestone) => milestone.features.some((feature) => feature.evidence.worker.childRunId === childRunId || feature.evidence.auditor.childRunId === childRunId
+      || feature.evidence.history.some((attempt) => attempt.worker.childRunId === childRunId || attempt.auditor.childRunId === childRunId)))
+  }
+  private childIdUsedAnywhere(childRunId: string): boolean {
+    return this.listSessions().some(({ id }) => { const plan = this.readPlan(id); return plan ? this.childIdUsed(plan, childRunId) : false })
+  }
+  private receiptIdUsedAnywhere(receiptId: string): boolean {
+    return this.listSessions().some(({ id }) => this.readPlan(id)?.milestones.some((milestone) => milestone.features.some((feature) => feature.evidence.worker.receipt?.id === receiptId
+      || feature.evidence.history.some((attempt) => attempt.worker.receipt?.id === receiptId))) === true)
+  }
+  private commitTransition(sessionId: string, plan: HorizonPlan): HorizonPlan {
+    plan.stats = computePlanStats(plan)
+    const validated = validateHorizonPlan(plan, sessionId)
+    atomicWriteJson(this.path(sessionId, "plan.json"), validated)
+    this.updateIndex(sessionId, validated)
+    return validated
+  }
+  beginWorker(sessionId: string, featureId: string, childRunId: string): HorizonPlan {
+    return this.withLock(() => {
+      const plan = this.readPlan(sessionId); if (!plan) throw new Error(`Horizon session not found: ${sessionId}`)
+      const { milestone, feature } = this.locateFeature(plan, featureId)
+      if (plan.status === "completed" || feature.status === "completed") throw new Error(`Feature ${featureId} is already completed`)
+      if (plan.status === "failed") throw new Error(`Horizon session ${sessionId} is failed and blocked`)
+      if (this.childIdUsedAnywhere(childRunId)) throw new Error(`Child run ID ${childRunId} has already been used`)
+      const cap = Math.min(feature.maxAttempts, this.loadConfig().maxRetryCycles)
+      if (feature.attempts >= cap) throw new Error(`Retry cap reached for ${featureId}`)
+      if (feature.evidence.worker.childRunId && feature.evidence.worker.receipt === null) throw new Error(`Previous worker for ${featureId} has not produced a receipt`)
+      if (feature.evidence.worker.receipt && feature.evidence.auditor.verdict === null) throw new Error(`Feature ${featureId} must be audited before corrective work begins`)
+      if (feature.evidence.auditor.verdict === "accept") throw new Error(`Accepted feature ${featureId} cannot restart`)
+      const activeChild = this.makeActiveChild(sessionId, featureId, "worker", childRunId)
+      const priorEvidence = structuredClone(feature.evidence)
+      feature.attempts += 1; feature.status = "in_progress"; feature.subAgentSessionId = childRunId
+      feature.evidence = emptyEvidence()
+      if (priorEvidence.worker.receipt && priorEvidence.auditor.verdict) feature.evidence.history = [...priorEvidence.history, { worker: priorEvidence.worker, auditor: priorEvidence.auditor }]
+      else feature.evidence.history = priorEvidence.history
+      feature.evidence.worker = { childRunId, startedAt: activeChild.acquiredAt, completedAt: null, receipt: null, summary: null, traceId: null }
+      feature.verification = { ...feature.verification, passed: false, featureDigest: null }
+      milestone.status = "in_progress"; plan.status = "executing"; plan.completedAt = null
+      const state = this.readState(sessionId)!; state.currentPhase = "execute"; state.currentMilestoneId = milestone.id; state.currentFeatureId = featureId; state.activeSubAgents = [childRunId]; state.pausedAt = null; state.pauseReason = null
+      return this.commitJournal("begin-worker", sessionId, plan, state, activeChild)
+    })
+  }
+  observeReceipt(projectRoot: string, sessionId: string, featureId: string, receiptId: string, summary: string, traceId: string | null = null): HorizonPlan {
+    return this.withLock(() => {
+      assertSafeId("receipt ID", receiptId); boundedSummary(summary, "worker summary"); if (traceId !== null) assertSafeId("trace ID", traceId)
+      const plan = this.readPlan(sessionId); if (!plan) throw new Error(`Horizon session not found: ${sessionId}`)
+      const { feature } = this.locateFeature(plan, featureId); const workerId = feature.evidence.worker.childRunId
+      if (!workerId) throw new Error(`Feature ${featureId} has no active worker`)
+      const lock = this.readActiveChild(sessionId); if (!lock || lock.role !== "worker" || lock.featureId !== featureId || lock.childRunId !== workerId) throw new Error("Worker receipt does not match the active child lock")
+      const receipt = new VerificationLedger(projectRoot).read().find((record) => record.id === receiptId)
+      if (!receipt) throw new Error(`Verification receipt '${receiptId}' was not found in the project ledger`)
+      if (receipt.sessionId !== workerId) throw new Error(`Receipt ${receiptId} belongs to ${receipt.sessionId}, not worker ${workerId}`)
+      if (resolve(receipt.cwd) !== resolve(projectRoot)) throw new Error(`Receipt ${receiptId} was produced in a different project root`)
+      if (this.receiptIdUsedAnywhere(receiptId)) throw new Error(`Verification receipt ${receiptId} has already been bound`)
+      const workerStartedAt = feature.evidence.worker.startedAt!
+      const receiptStartedAt = Date.parse(receipt.startedAt)
+      const durationMs = receipt.durationMs
+      const observedAt = this.currentTime()
+      if (!Number.isFinite(receiptStartedAt)) throw new Error(`Receipt ${receiptId} has an invalid startedAt timestamp`)
+      if (!Number.isFinite(durationMs) || durationMs < 0) throw new Error(`Receipt ${receiptId} has an impossible durationMs`)
+      const receiptEndedAt = receiptStartedAt + durationMs
+      if (!Number.isFinite(receiptEndedAt) || receiptEndedAt < receiptStartedAt) throw new Error(`Receipt ${receiptId} has an impossible logical end`)
+      if (receiptStartedAt < Date.parse(workerStartedAt)) throw new Error(`Receipt ${receiptId} started before worker ${workerId}; equality with worker start is allowed`)
+      if (receiptStartedAt > observedAt + RECEIPT_CLOCK_SKEW_MS) throw new Error(`Receipt ${receiptId} starts materially in the future`)
+      if (receiptEndedAt > observedAt + RECEIPT_CLOCK_SKEW_MS) throw new Error(`Receipt ${receiptId} ends materially in the future or has an impossible duration`)
+      const observedTimestamp = new Date(observedAt).toISOString()
+      feature.evidence.worker.receipt = { id: receipt.id, verdict: receipt.verdict, sessionId: receipt.sessionId, source: receipt.source, cwd: receipt.cwd, startedAt: receipt.startedAt, observedAt: observedTimestamp }
+      feature.evidence.worker.completedAt = observedTimestamp; feature.evidence.worker.summary = summary; feature.evidence.worker.traceId = traceId
+      const state = this.readState(sessionId)!; state.currentPhase = "audit"; state.activeSubAgents = []
+      return this.commitJournal("observe-receipt", sessionId, plan, state, null)
+    })
+  }
+  beginAuditor(sessionId: string, featureId: string, childRunId: string): HorizonPlan {
+    return this.withLock(() => {
+      const plan = this.readPlan(sessionId); if (!plan) throw new Error(`Horizon session not found: ${sessionId}`)
+      const { feature } = this.locateFeature(plan, featureId)
+      if (!feature.evidence.worker.receipt) throw new Error(`Feature ${featureId} requires an observed receipt before audit`)
+      if (feature.evidence.auditor.childRunId) throw new Error(`Feature ${featureId} already has an auditor for this attempt`)
+      if (this.childIdUsedAnywhere(childRunId)) throw new Error(`Child run ID ${childRunId} has already been used`)
+      const activeChild = this.makeActiveChild(sessionId, featureId, "auditor", childRunId)
+      feature.evidence.auditor = { childRunId, startedAt: activeChild.acquiredAt, completedAt: null, verdict: null, summary: null, traceId: null }
+      const state = this.readState(sessionId)!; state.currentPhase = "audit"; state.activeSubAgents = [childRunId]
+      return this.commitJournal("begin-auditor", sessionId, plan, state, activeChild)
+    })
+  }
+  recordAudit(sessionId: string, featureId: string, childRunId: string, verdict: HorizonAuditVerdict, summary: string, traceId: string | null = null): HorizonPlan {
+    return this.withLock(() => {
+      if (!AUDIT_VERDICTS.has(verdict)) throw new Error(`Invalid audit verdict: ${verdict}`)
+      boundedSummary(summary, "auditor summary"); if (traceId !== null) assertSafeId("trace ID", traceId)
+      const plan = this.readPlan(sessionId); if (!plan) throw new Error(`Horizon session not found: ${sessionId}`)
+      const { milestone, feature } = this.locateFeature(plan, featureId)
+      if (feature.evidence.auditor.childRunId !== childRunId) throw new Error("Audit child does not match the assigned independent auditor")
+      if (verdict === "accept" && feature.evidence.worker.receipt?.verdict !== "pass") throw new Error("A non-pass verification receipt cannot be accepted")
+      const lock = this.readActiveChild(sessionId)
+      if (!lock || lock.role !== "auditor" || lock.featureId !== featureId || lock.childRunId !== childRunId) throw new Error(`Active auditor lock does not match child ${childRunId}`)
+      feature.evidence.auditor.verdict = verdict; feature.evidence.auditor.completedAt = now(); feature.evidence.auditor.summary = summary; feature.evidence.auditor.traceId = traceId
+      const accepted = verdict === "accept" && feature.evidence.worker.receipt?.verdict === "pass"
+      const cap = Math.min(feature.maxAttempts, this.loadConfig().maxRetryCycles)
+      if (accepted) feature.status = "completed"
+      else if (feature.attempts >= cap) feature.status = "failed"
+      else feature.status = "pending"
+      if (feature.status === "failed") { milestone.status = "failed"; plan.status = "failed" }
+      else if (this.loadConfig().autoApproveMilestones && milestone.features.every((item) => item.status === "completed")) milestone.status = "completed"
+      if (plan.milestones.length > 0 && plan.milestones.every((item) => item.status === "completed")) { plan.status = "completed"; plan.completedAt = now() }
+      const state = this.readState(sessionId)!; state.activeSubAgents = []; state.currentFeatureId = feature.status === "pending" ? featureId : null; state.currentMilestoneId = feature.status === "pending" ? milestone.id : null
+      if (plan.status === "completed") state.currentPhase = "complete"
+      else if (feature.status === "failed") { state.currentPhase = "audit"; state.pausedAt = now(); state.pauseReason = `Retry cap reached for ${featureId}` }
+      else state.currentPhase = "execute"
+      return this.commitJournal("record-audit", sessionId, plan, state, null)
+    })
   }
   writePlan(sessionId: string, value: unknown, allowVerificationChanges = false): HorizonPlan {
     return this.withLock(() => {
       if (!this.readState(sessionId)) throw new Error(`Horizon session not initialized: ${sessionId}`)
       const existing = this.readPlan(sessionId)
+      if (existing && object(value) && Array.isArray(value.milestones)) {
+        const prior = new Map(existing.milestones.flatMap((milestone) => milestone.features.map((feature) => [feature.id, feature] as const)))
+        for (const rawMilestone of value.milestones) {
+          if (!object(rawMilestone) || !Array.isArray(rawMilestone.features)) continue
+          for (const rawFeature of rawMilestone.features) {
+            if (!object(rawFeature) || typeof rawFeature.id !== "string") continue
+            const before = prior.get(rawFeature.id); if (!before) continue
+            if (rawFeature.attempts !== before.attempts || rawFeature.status !== before.status || rawFeature.subAgentSessionId !== before.subAgentSessionId || JSON.stringify(rawFeature.evidence) !== JSON.stringify(before.evidence)) {
+              throw new Error(`Feature ${before.id} execution state may only be changed by Horizon transitions`)
+            }
+          }
+        }
+      }
       const plan = validateHorizonPlan(value, sessionId)
       if (existing?.status === "completed" && JSON.stringify(existing) !== JSON.stringify(plan)) throw new Error("Completed Horizon plans are immutable; create a new feature revision or session")
       const cap = this.loadConfig().maxRetryCycles
       if (plan.milestones.some((milestone) => milestone.features.some((feature) => feature.maxAttempts > cap))) throw new Error(`Feature maxAttempts exceeds configured maxRetryCycles (${cap})`)
-      const priorVerification = new Map(existing?.milestones.flatMap((milestone) => milestone.features.map((feature) => [feature.id, feature.verification] as const)) ?? [])
+      const priorFeatures = new Map(existing?.milestones.flatMap((milestone) => milestone.features.map((feature) => [feature.id, feature] as const)) ?? [])
       const nextFeatureIds = new Set(plan.milestones.flatMap((milestone) => milestone.features.map((feature) => feature.id)))
-      for (const [featureId, verification] of priorVerification) {
-        if (verification.passed && !nextFeatureIds.has(featureId)) throw new Error(`Verified feature ${featureId} cannot be removed; add a new unverified revision instead`)
+      for (const [featureId, prior] of priorFeatures) {
+        if ((prior.evidence.worker.childRunId || prior.evidence.auditor.childRunId) && !nextFeatureIds.has(featureId)) throw new Error(`Feature ${featureId} with execution evidence cannot be removed`)
       }
       for (const feature of plan.milestones.flatMap((milestone) => milestone.features)) {
-        const prior = priorVerification.get(feature.id)
-        if (!allowVerificationChanges && prior && JSON.stringify(prior) !== JSON.stringify(feature.verification)) throw new Error(`Feature ${feature.id} verification may only be updated by horizon_evaluate_subagent`)
-        const previousFeature = existing?.milestones.flatMap((milestone) => milestone.features).find((candidate) => candidate.id === feature.id)
-        if (previousFeature?.status === "completed" && feature.status !== "completed") throw new Error(`Completed feature ${feature.id} cannot be downgraded`)
-        if (!prior && (feature.verification.passed || feature.status === "completed")) throw new Error(`New feature ${feature.id} must begin unverified and incomplete`)
+        const prior = priorFeatures.get(feature.id)
+        if (!prior) {
+          if (feature.status !== "pending" || feature.attempts !== 0 || feature.subAgentSessionId !== null || feature.verification.passed || feature.verification.featureDigest !== null || JSON.stringify(feature.evidence) !== JSON.stringify(emptyEvidence())) {
+            throw new Error(`New feature ${feature.id} must begin pending with empty execution evidence`)
+          }
+          continue
+        }
+        if (JSON.stringify(prior.evidence) !== JSON.stringify(feature.evidence)) throw new Error(`Feature ${feature.id} evidence may only be changed by Horizon transitions`)
+        if (prior.status !== feature.status || prior.attempts !== feature.attempts || prior.subAgentSessionId !== feature.subAgentSessionId) throw new Error(`Feature ${feature.id} execution state may only be changed by Horizon transitions`)
+        if (!allowVerificationChanges && JSON.stringify(prior.verification) !== JSON.stringify(feature.verification)) throw new Error(`Feature ${feature.id} advisory evaluation may only be updated by horizon_evaluate_subagent`)
+        const definitionChanged = featureVerificationDigest(existing!.goal, prior) !== featureVerificationDigest(plan.goal, feature)
+        if (definitionChanged && (prior.evidence.worker.childRunId || prior.evidence.auditor.childRunId)) throw new Error(`Feature ${feature.id} definition cannot change after execution evidence exists`)
       }
       atomicWriteJson(this.path(sessionId, "plan.json"), plan)
       this.updateIndex(sessionId, plan)
@@ -481,6 +925,9 @@ export class HorizonStore {
       const milestone = plan.milestones.find((item) => item.features.some((candidate) => candidate.id === featureId))
       const feature = milestone?.features.find((item) => item.id === featureId)
       if (!feature || !milestone) return null
+      if ((updates.status !== undefined && updates.status !== feature.status) || updates.attempts !== undefined || updates.subAgentSessionId !== undefined || updates.evidence !== undefined) {
+        throw new Error("Feature execution state may only be changed by begin worker, receipt, and audit transitions")
+      }
       const next = { ...feature, ...updates }
       if (updates.status === "in_progress" && feature.status !== "in_progress" && updates.attempts === undefined) next.attempts = feature.attempts + 1
       if (next.attempts > Math.min(next.maxAttempts, this.loadConfig().maxRetryCycles)) throw new Error(`Retry cap reached for ${featureId}`)
@@ -519,7 +966,7 @@ export class HorizonStore {
       if (!feature) return null
       const currentDigest = featureVerificationDigest(plan.goal, feature)
       if (currentDigest !== expectedFeatureDigest) throw new Error(`Feature ${featureId} changed while verification was running; evaluate the new revision again`)
-      return this.updateFeature(sessionId, featureId, { verification: { ...verification, featureDigest: verification.passed ? currentDigest : null } }, true)
+      return this.updateFeature(sessionId, featureId, { verification: { ...verification, passed: false, featureDigest: currentDigest } }, true)
     })
   }
 
@@ -541,6 +988,7 @@ export class HorizonStore {
     })
   }
   readState(sessionId: string): HorizonState | null {
+    this.ensureRecovered(sessionId)
     const value = readJson(this.path(sessionId, "state.json"))
     return value === null ? null : validateHorizonState(value, sessionId)
   }
@@ -549,7 +997,11 @@ export class HorizonStore {
       const plan = this.readPlan(sessionId)
       if (!plan) throw new Error(`Horizon session not found: ${sessionId}`)
       const state = validateHorizonState(value, sessionId)
-      validateStateAgainstPlan(state, plan)
+      const active = this.readActiveChild(sessionId)
+      const expectedChildren = active ? [active.childRunId] : []
+      if (JSON.stringify(state.activeSubAgents) !== JSON.stringify(expectedChildren)) throw new Error("Horizon activeSubAgents must match the durable active-child lock")
+      if (active && state.currentFeatureId !== active.featureId) throw new Error("Horizon currentFeatureId must match the durable active-child lock")
+      validateHorizonStateAgainstPlan(state, plan)
       state.lastCheckpoint = now()
       atomicWriteJson(this.path(sessionId, "state.json"), state)
       return state
@@ -642,8 +1094,8 @@ export class HorizonStore {
     try { return readdirSync(dir).filter((name) => name.endsWith(".json")).map((name) => name.slice(0, -5)).sort() }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error }
   }
-  status(sessionId: string): { plan: HorizonPlan | null; state: HorizonState | null; decisions: HorizonDecision[]; research: { findings: string | null; sources: Record<string, string> }; skills: string[]; traces: string[] } {
-    return { plan: this.readPlan(sessionId), state: this.readState(sessionId), decisions: this.readDecisions(sessionId), research: this.readResearch(sessionId), skills: this.listSkills(sessionId), traces: this.listTraces(sessionId) }
+  status(sessionId: string): { plan: HorizonPlan | null; state: HorizonState | null; activeChild: HorizonActiveChildLock | null; decisions: HorizonDecision[]; research: { findings: string | null; sources: Record<string, string> }; skills: string[]; traces: string[] } {
+    return { plan: this.readPlan(sessionId), state: this.readState(sessionId), activeChild: this.readActiveChild(sessionId), decisions: this.readDecisions(sessionId), research: this.readResearch(sessionId), skills: this.listSkills(sessionId), traces: this.listTraces(sessionId) }
   }
 
   listSessions(): Array<{ id: string; meta: HorizonIndex["sessions"][string] }> {
@@ -671,6 +1123,11 @@ export function initHorizonSession(sessionId: string, goal: string, autonomyLeve
 export function readHorizonPlan(sessionId: string): HorizonPlan | null { return defaultStore().readPlan(sessionId) }
 export function writeHorizonPlan(sessionId: string, plan: HorizonPlan): HorizonPlan { return defaultStore().writePlan(sessionId, plan) }
 export function updateHorizonFeature(sessionId: string, featureId: string, updates: Partial<HorizonFeature>): HorizonPlan | null { return defaultStore().updateFeature(sessionId, featureId, updates) }
+export function beginHorizonWorker(sessionId: string, featureId: string, childRunId: string): HorizonPlan { return defaultStore().beginWorker(sessionId, featureId, childRunId) }
+export function observeHorizonReceipt(projectRoot: string, sessionId: string, featureId: string, receiptId: string, summary: string, traceId: string | null = null): HorizonPlan { return defaultStore().observeReceipt(projectRoot, sessionId, featureId, receiptId, summary, traceId) }
+export function beginHorizonAuditor(sessionId: string, featureId: string, childRunId: string): HorizonPlan { return defaultStore().beginAuditor(sessionId, featureId, childRunId) }
+export function recordHorizonAudit(sessionId: string, featureId: string, childRunId: string, verdict: HorizonAuditVerdict, summary: string, traceId: string | null = null): HorizonPlan { return defaultStore().recordAudit(sessionId, featureId, childRunId, verdict, summary, traceId) }
+export function recoverHorizonActiveChild(sessionId: string, expectedFeatureId: string, expectedChildRunId: string, childAlive?: boolean): boolean { return defaultStore().recoverActiveChild(sessionId, expectedFeatureId, expectedChildRunId, childAlive) }
 export function updateHorizonMilestone(sessionId: string, milestoneId: string, status: HorizonItemStatus): HorizonPlan | null { return defaultStore().updateMilestone(sessionId, milestoneId, status) }
 export function readHorizonState(sessionId: string): HorizonState | null { return defaultStore().readState(sessionId) }
 export function writeHorizonState(sessionId: string, state: HorizonState): HorizonState { return defaultStore().writeState(sessionId, state) }
