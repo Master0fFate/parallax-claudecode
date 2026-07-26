@@ -12,7 +12,7 @@ import {
   type VerificationVerdict,
 } from "./types.js"
 
-const AGENT_VERSION = "0.2.0"
+const AGENT_VERSION = "0.2.1"
 const SUPPORTED_AGENT_VERSIONS = new Set(["0.1.0", AGENT_VERSION])
 
 export function createTrace(sessionId: string, project: string, projectType: ProjectType = null): ParallaxTrace {

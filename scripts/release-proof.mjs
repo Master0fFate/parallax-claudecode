@@ -11,6 +11,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 const MAX_CAPTURE = 256 * 1024
 const AUDIT_LEVEL = "high"
 const AUDIT_SEVERITIES = ["info", "low", "moderate", "high", "critical"]
+const SUPPORTED_CLAUDE_RANGE = ">=2.1.215 <3"
 
 export function redact(value) {
   return String(value ?? "")
@@ -23,6 +24,13 @@ export function parseJsonLines(text) {
   return String(text).split(/\r?\n/).filter(Boolean).flatMap((line) => {
     try { return [JSON.parse(line)] } catch { return [] }
   })
+}
+
+export function supportsClaudeVersion(text) {
+  const match = /(?:^|\s)(\d+)\.(\d+)\.(\d+)(?:\s|$)/.exec(String(text))
+  if (!match) return false
+  const [, major, minor, patch] = match.map(Number)
+  return major === 2 && (minor > 1 || (minor === 1 && patch >= 215))
 }
 
 function octal(buffer, start, length) {
@@ -253,7 +261,7 @@ async function main() {
     if (!auditOkay) throw new Error(`npm audit found ${audit.applicable} ${AUDIT_LEVEL}-or-higher vulnerabilities or did not exit cleanly`)
     for (const manifest of ["plugin.json", "marketplace.json"]) await addRun(`strict-${manifest}`, "claude", ["plugin", "validate", "--strict", join(root, ".claude-plugin", manifest)], { timeoutMs: 60_000 })
     const version = await addRun("claude-version", "claude", ["--version"], { timeoutMs: 30_000 })
-    if (!/^2\.1\.215\b/m.test(version.stdout)) throw new Error(`Expected Claude Code 2.1.215, observed ${version.stdout.trim()}`)
+    if (!supportsClaudeVersion(version.stdout)) throw new Error(`Expected Claude Code ${SUPPORTED_CLAUDE_RANGE}, observed ${version.stdout.trim()}`)
 
     const [npmPack, npmPackArgs] = npmInvocation(["pack", "--json", "--pack-destination", packDir])
     const packed = await addRun("npm-pack-real", npmPack, npmPackArgs, { timeoutMs: 180_000 })
@@ -336,7 +344,7 @@ async function main() {
     const bare = await run("claude", ["-p", initPrompt, "--bare", "--plugin-dir", plugin, "--settings", join(config, "settings.json"), "--output-format", "stream-json", "--verbose", "--max-budget-usd", "0.01"], { cwd: project, env, timeoutMs: 120_000 })
     const bareInit = parseJsonLines(bare.stdout).find((event) => event.type === "system" && event.subtype === "init")
     const barePlugin = JSON.stringify(bareInit?.plugins ?? []).includes("parallax-claudecode")
-    checks.push(checkRecord("claude-bare-artifact-load", "runtime-cli", barePlugin ? "pass" : "fail", `pluginListed=${barePlugin}; mcpServers=${bareInit?.mcp_servers?.length ?? 0}; Claude Code 2.1.215 bare mode intentionally omits plugin hooks/MCP/agents, so isolated non-bare discovery follows`, { modelDependent: false }))
+    checks.push(checkRecord("claude-bare-artifact-load", "runtime-cli", barePlugin ? "pass" : "fail", `pluginListed=${barePlugin}; mcpServers=${bareInit?.mcp_servers?.length ?? 0}; Claude Code bare mode intentionally omits plugin hooks/MCP/agents, so isolated non-bare discovery follows`, { modelDependent: false }))
     const claudeArgs = ["-p", initPrompt, "--plugin-dir", plugin, "--settings", join(config, "settings.json"), "--output-format", "stream-json", "--include-hook-events", "--verbose", "--max-budget-usd", "0.01"]
     const claude = await run("claude", claudeArgs, { cwd: project, env, timeoutMs: 120_000 })
     const events = parseJsonLines(claude.stdout); const init = events.find((event) => event.type === "system" && event.subtype === "init")
@@ -395,7 +403,7 @@ async function main() {
   const report = {
     schemaVersion: 2,
     generatedAt: new Date().toISOString(),
-    artifact: { package: "parallax-claudecode", claudeCode: "2.1.215" },
+    artifact: { package: "parallax-claudecode", claudeCode: SUPPORTED_CLAUDE_RANGE },
     policy: { applicableChecksRequirePass: true, advisoryAuthenticationSkipsAreNonApplicable: true, npmAuditLevel: AUDIT_LEVEL, npmAuditDependencyScope: ["prod", "dev", "optional", "peer"], useEnvironmentAuthentication: useAuth, keepOnFailure },
     verdict: outcome.verdict,
     publishable: outcome.publishable,

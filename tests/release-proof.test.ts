@@ -2,7 +2,7 @@ import { gzipSync } from "node:zlib"
 import { EventEmitter } from "node:events"
 import { describe, expect, it, vi } from "vitest"
 // @ts-ignore Native ESM release helpers intentionally remain directly executable JavaScript.
-import { archiveProblems, computeReportVerdict, parseAuditReport, parseJsonLines, parseRoleFrontmatter, parseTar, redact, roleBoundaryProblems, terminateWindowsProcessTree } from "../scripts/release-proof.mjs"
+import { archiveProblems, computeReportVerdict, parseAuditReport, parseJsonLines, parseRoleFrontmatter, parseTar, redact, roleBoundaryProblems, supportsClaudeVersion, terminateWindowsProcessTree } from "../scripts/release-proof.mjs"
 
 function tarEntry(name: string, content: string, mode = 0o644): Buffer {
   const header = Buffer.alloc(512)
@@ -18,6 +18,14 @@ describe("release proof helpers", () => {
   it("redacts credential-shaped output and parses only structured lines", () => {
     expect(redact("token=secret-value sk-ant-1234567890")).toBe("token=[REDACTED] [REDACTED]")
     expect(parseJsonLines('{"ok":1}\nnoise\n{"ok":2}\n')).toEqual([{ ok: 1 }, { ok: 2 }])
+  })
+
+  it("accepts the supported Claude release range and rejects malformed or old versions", () => {
+    expect(supportsClaudeVersion("2.1.215 (Claude Code)")).toBe(true)
+    expect(supportsClaudeVersion("2.1.220 (Claude Code)")).toBe(true)
+    expect(supportsClaudeVersion("2.1.214 (Claude Code)")).toBe(false)
+    expect(supportsClaudeVersion("3.0.0 (Claude Code)")).toBe(false)
+    expect(supportsClaudeVersion("unknown")).toBe(false)
   })
 
   it("parses a real gzip tar header and rejects package-boundary violations", () => {

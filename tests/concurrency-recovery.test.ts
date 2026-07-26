@@ -208,6 +208,26 @@ describe.sequential("atomic state concurrency and corrupt recovery", () => {
     expect(JSON.parse(readFileSync(join(parent, backups[0]!, "index.json"), "utf8")).schemaVersion).toBeUndefined()
   })
 
+  it("upgrades pre-approval Horizon milestones without blocking startup", () => {
+    const root = workspace("pre-approval-horizon").root
+    const store = new HorizonStore(root)
+    store.initSession("legacy-approval", "Legacy approval defaults")
+    store.writePlan("legacy-approval", horizonPlan("legacy-approval"))
+
+    const planPath = join(root, "sessions", "legacy-approval", "plan.json")
+    const legacy = JSON.parse(readFileSync(planPath, "utf8")) as ReturnType<typeof horizonPlan>
+    delete (legacy.milestones[0] as Partial<(typeof legacy.milestones)[number]>).order
+    delete (legacy.milestones[0] as Partial<(typeof legacy.milestones)[number]>).requiresApproval
+    delete (legacy.milestones[0]!.features[0] as Partial<(typeof legacy.milestones)[number]["features"][number]>).order
+    delete (legacy.milestones[0]!.features[0] as Partial<(typeof legacy.milestones)[number]["features"][number]>).evidence
+    writeFileSync(planPath, JSON.stringify(legacy))
+
+    const migrated = new HorizonStore(root).readPlan("legacy-approval")!
+    expect(migrated.milestones[0]).toMatchObject({ order: 1, requiresApproval: false })
+    expect(migrated.milestones[0]!.features[0]).toMatchObject({ order: 1 })
+    expect(migrated.milestones[0]!.features[0]!.evidence).toBeDefined()
+  })
+
   it("rolls back a corrupt legacy migration after backing up every original artifact", () => {
     const parent = workspace("corrupt-legacy-horizon").root
     const root = join(parent, "horizon")

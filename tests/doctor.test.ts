@@ -20,7 +20,7 @@ function fixture(): string {
 
 function claude(args: string[]): DoctorCommandResult {
   if (args[0] === "--version") return { status: 0, stdout: "2.1.215 (Claude Code)\n", stderr: "" }
-  if (args[1] === "list" && args[2] === "--json") return { status: 0, stdout: JSON.stringify([{ id: "parallax-claudecode@parallax-local", version: "0.2.0", enabled: true }]), stderr: "" }
+  if (args[1] === "list" && args[2] === "--json") return { status: 0, stdout: JSON.stringify([{ id: "parallax-claudecode@parallax-local", version: "0.2.1", enabled: true }]), stderr: "" }
   return { status: 0, stdout: JSON.stringify([{ name: "parallax-local" }]), stderr: "" }
 }
 
@@ -29,7 +29,7 @@ afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: 
 describe("lifecycle doctor", () => {
   it("returns a stable healthy machine report and human Markdown", () => {
     const report = runDoctor({ root: fixture(), home: tmpdir(), runClaude: claude, now: () => new Date("2026-07-21T00:00:00.000Z") })
-    expect(report).toMatchObject({ schemaVersion: 1, healthy: true, generatedAt: "2026-07-21T00:00:00.000Z", product: { version: "0.2.0", supportedClaude: ">=2.1.215 <3" } })
+    expect(report).toMatchObject({ schemaVersion: 1, healthy: true, generatedAt: "2026-07-21T00:00:00.000Z", product: { version: "0.2.1", supportedClaude: ">=2.1.215 <3" } })
     expect(Object.keys(report)).toEqual(["schemaVersion", "healthy", "generatedAt", "product", "paths", "permissions", "checks"])
     expect(formatDoctorMarkdown(report)).toContain("**Verdict:** HEALTHY")
     expect(JSON.parse(JSON.stringify(report))).toEqual(report)
@@ -65,7 +65,10 @@ describe("lifecycle doctor", () => {
   })
 
   it("CLI emits parseable unhealthy JSON without a stack dump from an external cwd", () => {
-    const projectRoot = join(tmpdir(), `parallax-cli-${process.pid}-${Date.now()}`); roots.push(projectRoot); mkdirSync(projectRoot)
+    const projectRoot = join(tmpdir(), `parallax-cli-${process.pid}-${Date.now()}`); roots.push(projectRoot); mkdirSync(join(projectRoot, ".parallax"), { recursive: true })
+    // Keep the CLI outcome deterministic regardless of the developer's global
+    // Claude plugin registration.
+    writeFileSync(join(projectRoot, ".parallax", "config.json"), "{ malformed")
     const result = spawnSync(process.execPath, [join(process.cwd(), "scripts", "doctor.mjs"), "--json"], { cwd: projectRoot, encoding: "utf8" })
     expect(result.status).not.toBe(0)
     expect(() => JSON.parse(result.stdout || result.stderr)).not.toThrow()

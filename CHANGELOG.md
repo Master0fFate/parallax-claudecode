@@ -4,6 +4,14 @@ All notable changes to Parallax for Claude Code are documented here. This projec
 
 ## Unreleased
 
+## [0.2.1] - 2026-07-27
+
+### Fixed
+
+- Migrated legacy Horizon milestones that predate explicit ordering and approval fields without blocking startup.
+- Made the doctor CLI regression test deterministic regardless of the developer's global Claude plugin registration.
+- Accepted all supported Claude Code 2.x releases in release proof instead of pinning exactly 2.1.215.
+
 ## [0.2.0] - 2026-07-22
 
 ### Added
@@ -38,3 +46,4 @@ All notable changes to Parallax for Claude Code are documented here. This projec
 [0.1.1]: https://github.com/Master0fFate/parallax-claudecode/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/Master0fFate/parallax-claudecode/releases/tag/v0.1.0
 [0.2.0]: https://github.com/Master0fFate/parallax-claudecode/compare/v0.1.1...v0.2.0
+[0.2.1]: https://github.com/Master0fFate/parallax-claudecode/compare/v0.2.0...v0.2.1

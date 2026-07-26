@@ -542,10 +542,25 @@ export class HorizonStore {
       const raw = readJson(path)
       if (!object(raw) || !Array.isArray(raw.milestones)) continue
       let changed = false
-      for (const milestone of raw.milestones) {
+      for (const [milestoneIndex, milestone] of raw.milestones.entries()) {
         if (!object(milestone) || !Array.isArray(milestone.features)) continue
-        for (const feature of milestone.features) {
-          if (!object(feature) || feature.evidence !== undefined) continue
+        // Ordering and approval were added after the first Claude Code Horizon
+        // stores. Preserve the existing array order and automatic advancement.
+        if (milestone.order === undefined) {
+          milestone.order = milestoneIndex + 1
+          changed = true
+        }
+        if (milestone.requiresApproval === undefined) {
+          milestone.requiresApproval = false
+          changed = true
+        }
+        for (const [featureIndex, feature] of milestone.features.entries()) {
+          if (!object(feature)) continue
+          if (feature.order === undefined) {
+            feature.order = featureIndex + 1
+            changed = true
+          }
+          if (feature.evidence !== undefined) continue
           feature.evidence = emptyEvidence()
           feature.status = "pending"
           feature.subAgentSessionId = null
