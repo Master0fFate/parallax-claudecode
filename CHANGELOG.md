@@ -4,6 +4,13 @@ All notable changes to Parallax for Claude Code are documented here. This projec
 
 ## Unreleased
 
+## [0.2.2] - 2026-07-27
+
+### Fixed
+
+- Added a `parallax` skill compatibility entry point so callers that resolve the `parallax` agent through `Skill(...)` no longer fail during skill resolution.
+- Preserved the distinct plugin-scoped `parallax` Agent entry point for delegated implementation work.
+
 ## [0.2.1] - 2026-07-27
 
 ### Fixed
@@ -47,3 +54,4 @@ All notable changes to Parallax for Claude Code are documented here. This projec
 [0.1.0]: https://github.com/Master0fFate/parallax-claudecode/releases/tag/v0.1.0
 [0.2.0]: https://github.com/Master0fFate/parallax-claudecode/compare/v0.1.1...v0.2.0
 [0.2.1]: https://github.com/Master0fFate/parallax-claudecode/compare/v0.2.0...v0.2.1
+[0.2.2]: https://github.com/Master0fFate/parallax-claudecode/compare/v0.2.1...v0.2.2

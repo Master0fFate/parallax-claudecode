@@ -24,6 +24,15 @@ describe("publishable package boundary", () => {
     }
   })
 
+  it("keeps the parallax skill compatibility entry point distinct from the parallax agent", () => {
+    const skill = readFileSync(join(process.cwd(), "skills", "parallax", "SKILL.md"), "utf8")
+    const agent = readFileSync(join(process.cwd(), "agents", "parallax.md"), "utf8")
+    expect(skill).toMatch(/^name: parallax$/m)
+    expect(skill).toContain("compatibility entry point")
+    expect(agent).toMatch(/^name: parallax$/m)
+    expect(skill).not.toContain("Unknown skill")
+  })
+
   it("preserves installer scope without passing unsupported marketplace-update flags", () => {
     const installer = readFileSync(join(process.cwd(), "scripts", "install.mjs"), "utf8")
     expect(installer).toContain('["plugin", "update", "parallax-claudecode@parallax-local", "--scope", scope]')

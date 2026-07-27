@@ -17,7 +17,7 @@ Claude Code session
        -> Parallax protocol/mode/trace tools
        -> HorizonStore -> ~/.parallax/horizon
   -> agents/{parallax,horizon,horizon-worker,horizon-auditor}.md
-  -> skills/*/SKILL.md (invoked as /parallax-claudecode:<skill>)
+  -> skills/*/SKILL.md (invoked as /parallax-claudecode:<skill>, including the parallax compatibility entry point)
 ```
 
 ## Trust and state boundaries
@@ -41,3 +41,5 @@ Horizon enforces one correlated child lease and separates worker mutation from r
 TypeScript compiles to `dist/`. Plugin metadata references runtime files through `${CLAUDE_PLUGIN_ROOT}`, making source checkout, marketplace cache, and packed npm layouts relocatable. `npm run verify:package` checks that every declared runtime and user-facing asset is included by `npm pack`.
 
 `doctor.ts` is the shared diagnostic core for CLI, MCP, and status. Its schema-versioned JSON uses `<project>` and `~` path labels and does not emit settings contents, credentials, or full installation paths.
+
+The plugin exposes both a `parallax` subagent and a `parallax` skill compatibility entry point. Claude should delegate implementation work through the plugin-scoped Agent type; the skill alias exists so callers that resolve the name through `Skill(...)` do not fail with an unknown-skill error.

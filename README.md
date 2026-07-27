@@ -24,7 +24,7 @@ Parallax turns repository work into a visible, testable protocol. Before mutatio
 | **Auditable traces** | Linked decisions, mutations, verification results, friction, and coherence metrics |
 | **Hyperplan** | Adversarial plan review before high-risk architecture, migration, or security work |
 | **Horizon** | Durable milestone execution with bounded retries and independently verified completion |
-| **Claude-native integration** | 12 native lifecycle hook events, 37 MCP tools, 9 skills, and four focused agents |
+| **Claude-native integration** | 12 native lifecycle hook events, 37 MCP tools, 10 skills, and four focused agents |
 
 ## Requirements
 

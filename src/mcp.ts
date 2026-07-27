@@ -153,7 +153,7 @@ export class ParallaxMcpServer {
     const id = value.id
     if (method.startsWith("notifications/")) return null
     if (method === "initialize") {
-      return { jsonrpc: "2.0", id, result: { protocolVersion: MCP_PROTOCOL_VERSION, capabilities: { tools: { listChanged: false } }, serverInfo: { name: "parallax-claudecode", version: "0.2.1" } } }
+      return { jsonrpc: "2.0", id, result: { protocolVersion: MCP_PROTOCOL_VERSION, capabilities: { tools: { listChanged: false } }, serverInfo: { name: "parallax-claudecode", version: "0.2.2" } } }
     }
     if (method === "ping") return { jsonrpc: "2.0", id, result: {} }
     if (method === "tools/list") return { jsonrpc: "2.0", id, result: { tools: this.listTools() } }
