@@ -1,6 +1,6 @@
 {
   "name": "parallax-claudecode",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Session-safe Parallax protocol state, verification traces, coherence scoring, and validated Horizon persistence for Claude Code.",
   "author": {
     "name": "Master0fFate"

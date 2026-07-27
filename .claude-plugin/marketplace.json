@@ -9,7 +9,7 @@
     {
       "name": "parallax-claudecode",
       "description": "Session-safe protocol gates, verification traces, Hyperplan, and durable Horizon orchestration for Claude Code.",
-      "version": "0.2.2",
+      "version": "0.2.3",
       "author": {
         "name": "Master0fFate"
       },

@@ -226,9 +226,9 @@ function responseOutcome(value: unknown): ToolOutcome {
 }
 
 function normalizedTarget(projectRoot: string, target: string): string {
-  const absolute = resolve(projectRoot, target)
-  const local = relative(projectRoot, absolute)
-  return (local && !local.startsWith("..") && !isAbsolute(local) ? local : absolute).replaceAll("\\", "/")
+  const absolute = resolve(projectRoot, target.replaceAll("\\", "/"))
+  const local = relative(projectRoot, absolute).replaceAll("\\", "/")
+  return local && !local.startsWith("..") && !isAbsolute(local) ? local : absolute.replaceAll("\\", "/")
 }
 
 function normalizedInput(projectRoot: string, tool: string, value: unknown): unknown {
