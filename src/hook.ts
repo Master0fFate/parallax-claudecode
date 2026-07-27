@@ -140,6 +140,7 @@ const HORIZON_SUPERVISOR = "parallax-claudecode:horizon"
 const PARALLAX_MCP_PREFIX = "mcp__plugin_parallax-claudecode_parallax__"
 const WORKER_MCP = new Set(["parallax_checkin", "parallax_verify", "parallax_trace_export"])
 const AUDITOR_MCP = new Set(["horizon_read_plan", "horizon_read_state", "horizon_active_child", "parallax_trace_view"])
+const HORIZON_DISPATCH_FORMAT = 'HORIZON_DISPATCH {"sessionId":"<horizon-session>","featureId":"<feature>"}'
 
 function horizonRole(agentType: unknown): HorizonDispatchRole | null {
   return typeof agentType === "string" && agentType in HORIZON_AGENT_TYPES ? HORIZON_AGENT_TYPES[agentType as keyof typeof HORIZON_AGENT_TYPES] : null
@@ -159,7 +160,7 @@ function hasCompleteDelegatedIdentity(input: ClaudeHookInput): boolean {
 function dispatchEnvelope(prompt: unknown): { sessionId: string; featureId: string } {
   if (typeof prompt !== "string") throw new Error("Horizon dispatch prompt is missing")
   const first = prompt.split(/\r?\n/, 1)[0] ?? ""
-  if (!first.startsWith("HORIZON_DISPATCH ")) throw new Error("Horizon dispatch prompt must start with HORIZON_DISPATCH JSON")
+  if (!first.startsWith("HORIZON_DISPATCH ")) throw new Error(`Horizon worker dispatch requires the first prompt line: ${HORIZON_DISPATCH_FORMAT}. Do not dispatch a worker with only a human brief.`)
   const value: unknown = JSON.parse(first.slice("HORIZON_DISPATCH ".length))
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("HORIZON_DISPATCH must be an object")
   const record = value as Record<string, unknown>

@@ -10,6 +10,7 @@ All notable changes to Parallax for Claude Code are documented here. This projec
 
 - Added a `parallax` skill compatibility entry point so callers that resolve the `parallax` agent through `Skill(...)` no longer fail during skill resolution.
 - Preserved the distinct plugin-scoped `parallax` Agent entry point for delegated implementation work.
+- Made malformed Horizon worker dispatch errors actionable and documented the required session/feature envelope.
 
 ## [0.2.1] - 2026-07-27
 

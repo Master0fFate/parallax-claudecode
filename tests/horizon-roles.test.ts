@@ -25,6 +25,22 @@ const MCP = "mcp__plugin_parallax-claudecode_parallax__"
 function prompt(sessionId: string, featureId = "f1"): string { return `HORIZON_DISPATCH {"sessionId":"${sessionId}","featureId":"${featureId}"}\nAtomic brief` }
 
 describe("Claude Horizon role lifecycle", () => {
+  it("rejects an unbound human brief with the valid dispatch format", async () => {
+    const project = workspace("unbound-dispatch-project")
+    const parent = "unbound-dispatch-session"
+    await dispatchHook("SessionStart", { session_id: parent, cwd: project.root })
+    const result = await dispatchHook("PreToolUse", {
+      session_id: parent,
+      cwd: project.root,
+      tool_name: "Agent",
+      tool_use_id: "unbound-worker",
+      tool_input: { subagent_type: WORKER, prompt: "Repair E2E activation fake" },
+    })
+    const reason = (result.hookSpecificOutput as Record<string, unknown>).permissionDecisionReason as string
+    expect(reason).toContain('HORIZON_DISPATCH {"sessionId":"<horizon-session>","featureId":"<feature>"}')
+    expect(reason).toContain("Do not dispatch a worker with only a human brief")
+  })
+
   it("binds one worker, requires completed evidence and receipt, then binds a distinct read-only auditor", async () => {
     const project = workspace("roles-project"); const home = workspace("roles-home")
     process.env.PARALLAX_HORIZON_HOME = home.root
