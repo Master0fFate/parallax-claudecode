@@ -20,12 +20,12 @@ function text(result: Awaited<ReturnType<ParallaxMcpServer["callTool"]>>): strin
   return result.content[0]!.text
 }
 
-function appendPass(projectRoot: string, childRunId: string): string {
+function appendPass(projectRoot: string, childRunId: string, startedAt?: string): string {
   const receipt = createVerificationRecord({
     sessionId: childRunId, source: "manual", command: "node", args: ["--test"], cwd: projectRoot, timeoutMs: 100,
     durationMs: 1, exitCode: 0, verdict: "pass", changedFiles: [], stdout: "ok", stderr: "", combined: "ok",
     outputTruncated: false, timedOut: false, skipReason: null,
-  })
+   }, { startedAt })
   new VerificationLedger(projectRoot).append(receipt)
   return receipt.id
 }
@@ -138,16 +138,16 @@ describe("MCP tool contract matrix", () => {
     await server.callTool("horizon_init_session", { sessionId: "approval", goal: "Manual approval" })
     await server.callTool("horizon_write_plan", { sessionId: "approval", planJson: horizonPlan("approval") })
     await server.callTool("horizon_begin_worker", { sessionId: "approval", featureId: "f1", childRunId: "approval-worker" })
-    const receiptId = appendPass(projectRoot, "approval-worker")
+    const receiptId = appendPass(projectRoot, "approval-worker", server.horizon.readActiveChild("approval")!.acquiredAt)
     expect((await server.callTool("horizon_observe_receipt", { sessionId: "approval", parentSessionId: "approval-parent-worker", featureId: "f1", childRunId: "approval-worker", receiptId, summary: "premature" })).isError).toBe(true)
     completeDispatch(projectRoot, "approval-parent-worker", "approval", "worker", "approval-worker")
     const observed = await server.callTool("horizon_observe_receipt", { sessionId: "approval", parentSessionId: "approval-parent-worker", featureId: "f1", childRunId: "approval-worker", receiptId, summary: "worker complete" })
-    expect(observed.isError).not.toBe(true)
+    expect(observed.isError, text(observed)).not.toBe(true)
     const auditor = await server.callTool("horizon_begin_auditor", { sessionId: "approval", featureId: "f1", childRunId: "approval-auditor" })
-    expect(auditor.isError).not.toBe(true)
+    expect(auditor.isError, text(auditor)).not.toBe(true)
     completeDispatch(projectRoot, "approval-parent-auditor", "approval", "auditor", "approval-auditor")
     const audit = await server.callTool("horizon_record_audit", { sessionId: "approval", parentSessionId: "approval-parent-auditor", featureId: "f1", childRunId: "approval-auditor", verdict: "accept", summary: "accepted" })
-    expect(audit.isError).not.toBe(true)
+    expect(audit.isError, text(audit)).not.toBe(true)
     expect(server.horizon.readPlan("approval")).toMatchObject({ status: "executing", milestones: [{ status: "in_progress", features: [{ status: "completed" }] }] })
     expect((await server.callTool("horizon_write_state", { sessionId: "approval", stateJson: { currentPhase: "complete" } })).isError).toBe(true)
     expect((await server.callTool("horizon_update_milestone", { sessionId: "approval", milestoneId: "m1", status: "completed" })).isError).not.toBe(true)

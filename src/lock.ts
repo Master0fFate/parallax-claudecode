@@ -83,7 +83,11 @@ export function withDirectoryLock<T>(lock: string, operation: () => T, options: 
       const code = (error as NodeJS.ErrnoException).code
       // ENOENT after mkdir means a reclaimer removed this contender before owner.json was
       // installed. It was not active, so retry without touching a potentially replacement path.
-      if (code !== "EEXIST" && code !== "EAGAIN" && !(acquired && code === "ENOENT")) throw error
+      // Windows can report EPERM/EACCES while another process is creating or
+      // removing the lock directory. Treat those transient results as
+      // contention; a real permission problem will surface as a bounded
+      // timeout instead of killing one of the contending workers.
+      if (code !== "EEXIST" && code !== "EAGAIN" && code !== "EPERM" && code !== "EACCES" && !(acquired && code === "ENOENT")) throw error
 
       // Normal contention only waits. Creating claims for every live lock would starve the
       // current owner because claims could continuously cover its release window.
@@ -93,7 +97,7 @@ export function withDirectoryLock<T>(lock: string, operation: () => T, options: 
         const statCode = (statError as NodeJS.ErrnoException).code
         if (statCode !== "ENOENT" && statCode !== "EPERM" && statCode !== "EACCES") throw statError
       }
-      if (code !== "EAGAIN" && looksStale) {
+      if (code !== "EAGAIN" && code !== "EPERM" && code !== "EACCES" && looksStale) {
         const claim = join(parent, `${claimPrefix}${process.pid}.${randomUUID()}`)
         const claimToken = randomUUID()
         try {
