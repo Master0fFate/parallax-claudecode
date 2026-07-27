@@ -131,9 +131,10 @@ describe("MCP tool contract matrix", () => {
   })
 
   it("requires explicit milestone approval when auto-approval is disabled and then finalizes consistently", async () => {
-    const projectRoot = workspace("approval-project").root
-    writeFileSync(join(projectRoot, "package.json"), JSON.stringify({ scripts: { check: "node -e \"process.exit(0)\"" } }))
-    const server = new ParallaxMcpServer({ projectRoot, horizonRoot: workspace("approval-store").root })
+    const requestedRoot = workspace("approval-project").root
+    writeFileSync(join(requestedRoot, "package.json"), JSON.stringify({ scripts: { check: "node -e \"process.exit(0)\"" } }))
+    const server = new ParallaxMcpServer({ projectRoot: requestedRoot, horizonRoot: workspace("approval-store").root })
+    const projectRoot = server.projectRoot
     await server.callTool("horizon_config", { configJson: { autoApproveMilestones: false } })
     await server.callTool("horizon_init_session", { sessionId: "approval", goal: "Manual approval" })
     await server.callTool("horizon_write_plan", { sessionId: "approval", planJson: horizonPlan("approval") })
