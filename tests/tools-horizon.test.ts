@@ -25,7 +25,7 @@ function appendPass(projectRoot: string, childRunId: string, startedAt?: string)
     sessionId: childRunId, source: "manual", command: "node", args: ["--test"], cwd: projectRoot, timeoutMs: 100,
     durationMs: 1, exitCode: 0, verdict: "pass", changedFiles: [], stdout: "ok", stderr: "", combined: "ok",
     outputTruncated: false, timedOut: false, skipReason: null,
-   }, { startedAt })
+   }, startedAt === undefined ? undefined : { startedAt })
   new VerificationLedger(projectRoot).append(receipt)
   return receipt.id
 }
