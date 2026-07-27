@@ -98,7 +98,7 @@ describe("session-safe core", () => {
     const state = createSessionState("trace-validation", temporary())
     const verification = createVerificationRecord({ command: "test", files: ["a.ts"], verdict: "pass", exitCode: 0, durationMs: 1, stdout: "ok", stderr: "" })
     addWriteBatch(state.trace, ["a.ts", "b.ts"], "Edit", verification, 3)
-    expect(state.trace.session.agentVersion).toBe("0.2.3")
+    expect(state.trace.session.agentVersion).toBe("0.2.4")
     expect(validateSessionState(structuredClone(state))).toBeTruthy()
     const priorPatch = structuredClone(state)
     priorPatch.trace.session.agentVersion = "0.1.0"

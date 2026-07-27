@@ -4,6 +4,13 @@ All notable changes to Parallax for Claude Code are documented here. This projec
 
 ## Unreleased
 
+## [0.2.4] - 2026-07-27
+
+### Fixed
+
+- Treated transient Windows `EPERM`/`EACCES` lock-directory races as bounded contention instead of fatal worker failures.
+- Made Horizon receipt fixtures use canonical project roots and deterministic worker timestamps across platforms.
+
 ## [0.2.3] - 2026-07-27
 
 ### Fixed
@@ -64,3 +71,4 @@ All notable changes to Parallax for Claude Code are documented here. This projec
 [0.2.1]: https://github.com/Master0fFate/parallax-claudecode/compare/v0.2.0...v0.2.1
 [0.2.2]: https://github.com/Master0fFate/parallax-claudecode/compare/v0.2.1...v0.2.2
 [0.2.3]: https://github.com/Master0fFate/parallax-claudecode/compare/v0.2.2...v0.2.3
+[0.2.4]: https://github.com/Master0fFate/parallax-claudecode/compare/v0.2.3...v0.2.4
